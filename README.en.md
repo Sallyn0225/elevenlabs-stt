@@ -101,7 +101,7 @@ stt selfcheck          offline self-check (no network)
 
 ## How it works
 
-The script calls the web app's internal API (`api.us.elevenlabs.io`) directly with `httpx`, authenticating with a Firebase JWT bearer token. The login step uses Playwright to launch the system Chrome, read the Firebase session from localStorage, and export the refresh token; the runtime never needs a browser. The captured API contract lives at `.trellis/tasks/07-01-elevenlabs-stt-script/research/api-contract.md`.
+The script calls the web app's internal API (`api.us.elevenlabs.io`) directly with `httpx`, authenticating with a Firebase JWT bearer token. The login step uses Playwright to launch the system Chrome, read the Firebase session from localStorage, and export the refresh token; the runtime never needs a browser. The captured API contract lives in [`docs/api-contract.md`](./docs/api-contract.md).
 
 ## Files
 

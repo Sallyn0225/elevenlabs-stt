@@ -101,7 +101,7 @@ stt selfcheck          离线自检（不联网）
 
 ## 工作原理
 
-脚本用 `httpx` 直接调用网页应用的内部 API（`api.us.elevenlabs.io`），鉴权用 Firebase JWT bearer 令牌。登录步骤用 Playwright 启动本机 Chrome 读取 localStorage 中的 Firebase 会话，导出 refresh token；运行时不依赖浏览器。抓包契约见 `.trellis/tasks/07-01-elevenlabs-stt-script/research/api-contract.md`。
+脚本用 `httpx` 直接调用网页应用的内部 API（`api.us.elevenlabs.io`），鉴权用 Firebase JWT bearer 令牌。登录步骤用 Playwright 启动本机 Chrome 读取 localStorage 中的 Firebase 会话，导出 refresh token；运行时不依赖浏览器。抓包契约见 [`docs/api-contract.md`](./docs/api-contract.md)。
 
 ## 文件
 
