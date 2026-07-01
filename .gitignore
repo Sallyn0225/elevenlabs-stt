@@ -15,3 +15,6 @@ out.vtt
 *.png
 __pycache__/
 *.pyc
+
+# Claude Design handoff bundle (transient import artifact)
+*-handoff.zip
