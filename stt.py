@@ -192,6 +192,7 @@ def _session_to_account(sess: dict[str, Any], source: str) -> dict[str, Any]:
         "credits_known": sess.get("credits_known"),  # {limit,count,fetched_at} or None
         "invalid": sess.get("invalid", False),
         "invalid_reason": sess.get("invalid_reason"),
+        "password": sess.get("password"),  # plaintext, so re-login is possible from the pool
     }
 
 
@@ -318,6 +319,7 @@ def account_from_password_signin(email: str, password: str, temp_address: str | 
         "refreshToken": data.get("refreshToken"),
         "localId": data.get("localId"),
         "email": data.get("email"),
+        "password": password,
         "jwt": data.get("idToken"),
         "jwt_exp": time.time() + int(data.get("expiresIn", 3600)) - 60,
         "temp_address": temp_address or email,
