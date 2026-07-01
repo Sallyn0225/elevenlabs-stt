@@ -70,9 +70,9 @@ save to store; return account
 **RESOLVED (step 4):** REST `accounts:update` alone is insufficient and may consume the
 OOB code. The working path is: real Chrome signup → poll temp-mail → open the emailed
 `/app/action?mode=verifyEmail&oobCode=...` link in the same real Chrome → click the
-Email Verification modal **Continue** → sign in again with the same email/password.
-After that, REST `accounts:signInWithPassword` succeeds and `/v1/user/subscription`
-returns 10000 credits.
+Email Verification modal **Continue** → sign in on the web page with the same
+email/password. After that, REST `accounts:signInWithPassword` succeeds and
+`/v1/user/subscription` returns 10000 credits.
 
 Dependencies added (pip, kept): pyautogui, pygetwindow, pyperclip,
 playwright-stealth (2.0.3, not effective vs hCaptcha Enterprise but installed).
@@ -271,9 +271,9 @@ No network.
 ### Resolved blocker (step 4 of register_one)
 Working path: skip REST `accounts:update`; navigate the emailed verification link in
 real Chrome. The page redirects to `/app/sign-in` and shows an "Email Verification"
-modal. Click **Continue**, then sign in again with the same email/password. This flips
-whatever ElevenLabs server-side verified state the blocking function needs; after this,
-REST `accounts:signInWithPassword` works and yields refreshToken/localId/idToken.
+modal. Click **Continue**, then sign in on the web page with the same email/password.
+This flips whatever ElevenLabs server-side verified state the blocking function needs;
+after this, REST `accounts:signInWithPassword` works and yields refreshToken/localId/idToken.
 
 Implementation note: Chrome password-manager popups can appear after successful sign-in;
 they do not block REST token capture.
@@ -288,13 +288,12 @@ an anonymous browser state. Prefer a temporary `--user-data-dir` per registratio
 that is less fragile than clicking sign-out UI.
 
 ### Credentials (Q5, for next session — DO NOT COMMIT)
-- temp-email base_url: `https://apimail.misuzu.mom`, admin_password: `<ADMIN_PASSWORD>` (redacted; in local config.toml),
-  domain: `edu.hmhnk.com`. `/open_api/settings`: prefix="", needAuth=false,
-  enableUserCreateEmail=true, no Turnstile, version v1.9.0. Domains: misuzu.mom,
-  sallyn.top, edu.misuzu.mom, edu.mamimi.site, hmhnk.com, edu.hmhnk.com.
-- Already in local `config.toml` (gitignored).
-- Test accounts created (disposable, in temp-email, no ElevenLabs workspace confirmed):
-  el1782894750/5775/6088/6204/6462/6538/6825@edu.hmhnk.com (password redacted).
+- Real temp-email base URL, admin password, and domain are in local `config.toml`
+  (gitignored). Do not commit them.
+- `/open_api/settings` probed successfully: prefix="", needAuth=false,
+  enableUserCreateEmail=true, no Turnstile, version v1.9.0.
+- Several disposable test accounts were created during live validation; addresses
+  and passwords intentionally omitted from tracked docs.
 
 ### Dependencies (pip, kept)
 pyautogui, pygetwindow, pyperclip, playwright-stealth 2.0.3 (installed, not effective

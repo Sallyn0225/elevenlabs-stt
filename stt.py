@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from typing import Any
@@ -582,45 +583,99 @@ def register_one() -> dict[str, Any]:
     email = addr["address"]
     password = random_password()
     chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    profile_dir = tempfile.mkdtemp(prefix="elevenlabs-stt-chrome-")
+    prefs_path = pathlib.Path(profile_dir) / "Default" / "Preferences"
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    prefs_path.write_text(json.dumps({
+        "credentials_enable_service": False,
+        "profile": {"password_manager_enabled": False},
+    }), encoding="utf-8")
 
-    # ponytail: coordinates are ugly, but selector automation triggers hCaptcha; real Chrome doesn't.
-    wins = [w for w in gw.getAllWindows() if "Google Chrome" in w.title]
-    if wins:
-        wins[0].restore(); wins[0].activate(); wins[0].maximize()
-    else:
-        subprocess.Popen([chrome, "--new-window", "https://elevenlabs.io/app/sign-up"])
-    time.sleep(1)
+    # ponytail: fresh profile per account avoids logged-in Chrome redirecting sign-up to onboarding.
+    # Coordinates are ugly, but selector automation triggers hCaptcha; real Chrome doesn't.
+    def window_key(w: Any) -> Any:
+        return getattr(w, "_hWnd", None) or (w.title, w.left, w.top, w.width, w.height)
+
+    before_windows = {window_key(w) for w in gw.getAllWindows()
+                      if "Google Chrome" in w.title}
+    subprocess.Popen([
+        chrome,
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--new-window",
+        "--window-position=40,40",
+        "--disable-save-password-bubble",
+        "https://elevenlabs.io/app/sign-up",
+    ])
+    new_window = None
+    deadline = time.time() + 10
+    while time.time() < deadline and new_window is None:
+        time.sleep(0.5)
+        for w in gw.getAllWindows():
+            if "Google Chrome" in w.title and window_key(w) not in before_windows:
+                new_window = w
+                break
+    if new_window is None:
+        raise SystemExit("auto-register could not find the new temporary Chrome window; aborting")
+    new_window.restore(); new_window.activate(); new_window.maximize()
+    time.sleep(4)
+
+    def click_frac(x_frac: float, y_frac: float) -> None:
+        pyautogui.click(new_window.left + int(new_window.width * x_frac),
+                        new_window.top + int(new_window.height * y_frac))
+
+    def paste(text: str) -> None:
+        pyperclip.copy(text)
+        pyautogui.hotkey("ctrl", "v")
+
     pyautogui.hotkey("ctrl", "l")
-    pyperclip.copy("https://elevenlabs.io/app/sign-up")
-    pyautogui.hotkey("ctrl", "v")
+    paste("https://elevenlabs.io/app/sign-up")
     pyautogui.press("enter")
-    time.sleep(5)
-    pyautogui.click(1080, 522); pyautogui.hotkey("ctrl", "a")
-    pyperclip.copy(email); pyautogui.hotkey("ctrl", "v")
-    pyautogui.click(1080, 608); pyautogui.hotkey("ctrl", "a")
-    pyperclip.copy(password); pyautogui.hotkey("ctrl", "v")
-    pyautogui.click(1080, 750)
+    time.sleep(12)
+
+    click_frac(0.50, 0.56)  # signup email
+    pyautogui.hotkey("ctrl", "a"); paste(email)
+    pyautogui.press("tab"); paste(password)
+    pyautogui.press("enter")
 
     link = latest_verify_link(addr["jwt"])
     pyautogui.hotkey("ctrl", "l")
-    pyperclip.copy(link)
-    pyautogui.hotkey("ctrl", "v")
+    paste(link)
     pyautogui.press("enter")
-    time.sleep(3)
-    pyautogui.click(1242, 618)  # verification modal Continue
-    time.sleep(1)
-    pyautogui.click(1080, 610); pyautogui.hotkey("ctrl", "a")
-    pyperclip.copy(email); pyautogui.hotkey("ctrl", "v")
-    pyautogui.click(1080, 696); pyautogui.hotkey("ctrl", "a")
-    pyperclip.copy(password); pyautogui.hotkey("ctrl", "v")
-    pyautogui.click(1080, 759)
+    time.sleep(15)
+    pyautogui.press("enter")  # modal Continue if focused
+    click_frac(0.50, 0.62)
+    click_frac(0.65, 0.62)  # verification modal Continue fallback
     time.sleep(8)
+    click_frac(0.50, 0.62)  # sign-in email
+    pyautogui.hotkey("ctrl", "a"); paste(email)
+    pyautogui.press("tab"); paste(password)
+    pyautogui.press("enter")
+    time.sleep(15)
 
     account = account_from_password_signin(email, password, temp_address=email)
     with authed_client(account, save=lambda _s: None) as client:
         client.get("/v1/user")
         refresh_credits(account, client)
     return account
+
+
+def fresh_count(store: dict[str, Any], threshold: int) -> int:
+    return sum(1 for a in store["accounts"]
+               if not a.get("invalid") and (cached_remaining(a) or 0) >= threshold)
+
+
+def refill_pool(store: dict[str, Any], config_path: pathlib.Path) -> None:
+    acfg = accounts_config(config_path)
+    if not acfg["auto_refill"] or not has_temp_email_config(config_path):
+        return
+    active = store.get("active")
+    while fresh_count(store, acfg["fresh_threshold"]) < acfg["pool_target"]:
+        print("pool below target; registering refill account...", file=sys.stderr)
+        account = register_one()
+        upsert_account(store, account)
+        store["active"] = active
+        save_accounts(store)
 
 
 def select_account(accounts: list[dict[str, Any]], required: int | None,
@@ -757,7 +812,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     else:
         print(f"selected {chosen.get('email')} (remaining={cached_remaining(chosen)}, "
               f"required~{required})", file=sys.stderr)
-    save_accounts(store)  # persist credits_known / jwt updates from the selection pass
+    store["active"] = chosen["email"]
+    save_accounts(store)  # persist active pointer / credits_known / jwt updates from the selection pass
     account = chosen
     # ponytail: account dict reuses the session shape, so get_jwt/authed_client work as-is;
     # the save callback persists Firebase's rotated refresh token back into accounts.json.
@@ -782,6 +838,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     out = pathlib.Path(args.output) if args.output else audio.with_suffix(f".{fmt}")
     out.write_bytes(content)
     print(f"wrote {out} ({len(content)} bytes)")
+    account_remaining(account, store, force=True)  # refresh post-use credits before refill decision
+    try:
+        refill_pool(store, pathlib.Path(args.config))
+    except KeyboardInterrupt:
+        print("pool refill skipped (interrupted)", file=sys.stderr)
     return 0
 
 
@@ -835,6 +896,7 @@ def _selfcheck() -> int:
     # needed = 800*1.2+1 = 961; a(1000) & b(10000) sufficient; best-fit picks smallest => a
     assert chosen["email"] == "a", f"best-fit should pick a, got {chosen and chosen['email']}"
     assert len(info) == 2  # invalid account 'c' skipped
+    assert fresh_count(fstore, 10000) == 1 and fresh_count(fstore, 1000) == 2
     assert select_account(fake, required=9000, margin=1.2, store=fstore)[0] is None  # needed=10801
     assert select_account(fake, required=None, margin=1.2, store=fstore)[0]["email"] == "a"  # active fallback
     print("selfcheck ok")
@@ -886,9 +948,10 @@ def cmd_pool(args: argparse.Namespace) -> int:
 
 def cmd_pool_warm(args: argparse.Namespace) -> int:
     store = load_accounts()
-    target = args.target or accounts_config(pathlib.Path(args.config))["pool_target"]
+    acfg = accounts_config(pathlib.Path(args.config))
+    target = args.target or acfg["pool_target"]
     while True:
-        fresh = sum(1 for a in store["accounts"] if not a.get("invalid") and (cached_remaining(a) or 0) >= accounts_config(pathlib.Path(args.config))["fresh_threshold"])
+        fresh = fresh_count(store, acfg["fresh_threshold"])
         if fresh >= target:
             print(f"pool warm: {fresh}/{target}")
             return 0

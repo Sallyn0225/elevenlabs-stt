@@ -2,12 +2,14 @@
 
 > **STATUS (2026-07-01):** Steps 1, 2, 7 DONE & committed. Step 3 DONE in working tree.
 > Step 4 unblocked: real Chrome signup → open emailed `/app/action` verify link → click modal
-> Continue → sign in again → Firebase REST `signInWithPassword` succeeds and `/v1/user/subscription`
-> returns 10000 credits. Step 5 wired in working tree; `stt transcribe _tmp-sample.m4a --show-cost`
-> selected the auto account and completed. Step 6 `pool warm` is minimally wired; target=1 validated.
-> Full pool target warm repeat is BLOCKED: the reused Chrome profile remains logged in and redirects
-> `/app/sign-up` to `/app/onboarding`. Next fix: launch each registration with a fresh temporary
-> Chrome `--user-data-dir` (or otherwise clear/sign out). Q5 creds are in local config.toml (gitignored).
+> Continue → web sign-in with same email/password → Firebase REST `signInWithPassword`
+> succeeds and `/v1/user/subscription` returns 10000 credits. Step 5 wired in working tree;
+> `stt transcribe _tmp-sample.m4a --show-cost` selected the auto account and completed.
+> Step 6 now launches each registration with a fresh temporary Chrome `--user-data-dir`,
+> only activates the newly-created Chrome window, and transcribe runs auto-refill after refreshing
+> post-use credits. Live validation: `stt pool warm --target 1`, `--target 2`, and `--target 3`
+> all succeeded with fresh accounts.
+> Q5 creds are in local config.toml (gitignored).
 
 Inline workflow (Pi): the main session edits `stt.py` directly. Each step ends
 with a runnable validation. Do not `task.py start` until the user reviews the
@@ -80,15 +82,17 @@ planning artifacts.
 - **Validate (needs creds):** deplete/clear accounts so none sufficient →
   `stt transcribe _tmp-sample.m4a` auto-registers and completes.
 
-### Step 6 — Pool warming + auto-refill (R3, AC5)
+### Step 6 — Pool warming + auto-refill (R3, AC5) — DONE/live-validated
 - `cmd_pool_warm(target)`: `while fresh_count() < target: register_one()`
   (frequency-controlled).
 - `cmd_pool_status`: print fresh/usable/depleted/invalid counts.
 - Auto-refill: at end of `cmd_transcribe`, if `auto_refill` and
   `fresh_count() < pool_target`, register replacements (wrapped so Ctrl+C skips
-  cleanly with a message).
-- **Validate (needs creds):** `stt pool warm --target 2` → 2 fresh accounts;
-  `stt pool status` counts correct; after a transcription, refill runs.
+  cleanly with a message). Refill preserves the transcribe-selected active account.
+- **Validated (live creds):** `stt pool warm --target 1`, `--target 2`, and
+  `--target 3` all succeeded; `stt transcribe _tmp-sample.m4a --show-cost`
+  selected the best-fit usable account, completed transcription, and auto-refill
+  registered a replacement when fresh-count dropped below target.
 
 ### Step 7 — CLI subcommands + selfcheck (AC3, AC7, AC8)
 - Wire `accounts` (with `--refresh`), `pool` (`warm`/`status`) subcommands in
