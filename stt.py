@@ -244,19 +244,6 @@ def upsert_account(store: dict[str, Any], account: dict[str, Any]) -> None:
     store["active"] = account["email"]
 
 
-def active_account(store: dict[str, Any]) -> dict[str, Any] | None:
-    """The last-used account, else the first non-invalid account."""
-    accts = store["accounts"]
-    target = store.get("active")
-    for a in accts:
-        if a.get("email") == target and not a.get("invalid"):
-            return a
-    for a in accts:
-        if not a.get("invalid"):
-            return a
-    return accts[0] if accts else None
-
-
 def get_jwt(session: dict[str, Any], save=None) -> str:
     jwt = session.get("jwt")
     exp = session.get("jwt_exp", 0)
@@ -697,27 +684,65 @@ def refill_pool(store: dict[str, Any], config_path: pathlib.Path) -> None:
         save_accounts(store)
 
 
-def select_account(accounts: list[dict[str, Any]], required: int | None,
-                    margin: float, store: dict[str, Any]) -> tuple[dict[str, Any] | None, list]:
-    """Best-fit + margin: the smallest remaining that covers required*margin.
-    Returns (chosen_or_None, [(email, remaining), ...]) for logging. If required is
-    None (duration unknown), falls back to the active account without a sufficiency check."""
-    if required is None:
-        return active_account(store), []
-    needed = int(required * margin) + 1
-    sufficient: list[tuple[dict, int]] = []
-    info: list[tuple[str | None, int | None]] = []
-    for a in accounts:
-        if a.get("invalid"):
+class _Bin:
+    """A packing bin: an existing account (account set) or a virtual fresh bin (account None)."""
+    __slots__ = ("account", "residual", "slot")
+
+    def __init__(self, account, residual, slot=None):
+        self.account = account
+        self.residual = residual
+        self.slot = slot  # "NEW#k" label for virtual bins
+
+
+def allocate(costs, accounts, margin, fresh_threshold, store):
+    """Bin-pack files across existing accounts (best-fit) then virtual fresh bins.
+
+    costs: [(audio_path, required_or_None)]; accounts: non-invalid account dicts.
+    Returns (plan, register_count) where plan is an ordered list of
+    (audio_path, account_dict_or_"NEW#k"), existing-account files before NEW ones.
+    """
+    def need(req):
+        return None if req is None else int(req * margin) + 1
+
+    # FFD: largest need first. Unknown-duration files (key -1) sort last but their
+    # order is irrelevant — the loop gives each its own dedicated fresh bin regardless.
+    files = sorted(costs, key=lambda fc: (-1 if fc[1] is None else need(fc[1])),
+                   reverse=True)
+
+    bins = [_Bin(a, account_remaining(a, store) or 0) for a in accounts]
+    fresh_cap = int(fresh_threshold * margin)
+    virtual: list[_Bin] = []
+    plan: list[tuple[Any, Any]] = []
+
+    def open_virtual(residual):
+        b = _Bin(None, residual, slot=f"NEW#{len(virtual)}")
+        virtual.append(b)
+        return b
+
+    for file, req in files:
+        if req is None:  # unknown duration -> dedicated fresh bin
+            b = open_virtual(0)
+            plan.append((file, b.slot))
             continue
-        rem = account_remaining(a, store)
-        info.append((a.get("email"), rem))
-        if rem is not None and rem >= needed:
-            sufficient.append((a, rem))
-    if not sufficient:
-        return None, info
-    chosen, _ = min(sufficient, key=lambda ar: ar[1])
-    return chosen, info
+        n = need(req)
+        cand = [b for b in bins if b.residual >= n]
+        if cand:
+            b = min(cand, key=lambda b: b.residual)  # best-fit: smallest residual that covers
+        else:
+            vc = [b for b in virtual if b.residual >= n]
+            if vc:
+                b = min(vc, key=lambda b: b.residual)
+            else:
+                if n > fresh_cap:
+                    raise SystemExit(f"{file}: needs {n} > one free account ({fresh_cap}); out of scope")
+                b = open_virtual(fresh_cap)
+        b.residual -= n
+        plan.append((file, b.account if b.account is not None else b.slot))
+
+    register_count = len(virtual)
+    # existing-account files first, NEW#k files last; stable within each group.
+    plan.sort(key=lambda pa: isinstance(pa[1], str))
+    return plan, register_count
 
 
 # ------------------------------------------------------------- subcommands
@@ -771,11 +796,58 @@ def cmd_login(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_transcribe(args: argparse.Namespace) -> int:
-    audio = pathlib.Path(args.audio)
-    if not audio.exists():
-        raise SystemExit(f"audio not found: {audio}")
+def transcribe_one(audio, cfg, account, store, config_path, output=None) -> pathlib.Path:
+    """Upload → poll → export → write one file on the given account. Returns the output path."""
+    size = audio.stat().st_size
+    duration = audio_duration(audio)
+    # ponytail: account dict reuses the session shape, so get_jwt/authed_client work as-is;
+    # the save callback persists Firebase's rotated refresh token back into accounts.json.
+    with authed_client(account, save=lambda _s: save_accounts(store)) as client:
+        if cfg["show_cost"] and duration:
+            credits = get_cost(client, duration)
+            if credits is not None:
+                print(f"estimated cost: {credits} credits", file=sys.stderr)
 
+        print(f"uploading {audio.name} ({size/1e6:.1f} MB)...", file=sys.stderr)
+        task = create_task(client, audio, cfg)
+        task_id = task["_id"]
+        print(f"  task {task_id} state={task.get('state')}", file=sys.stderr)
+
+        result = poll_task(client, task_id, cfg["poll_timeout_secs"])
+        lang_code = (result.get("result") or {}).get("language_code")
+
+        fmt = cfg["export_format"]
+        print(f"exporting {fmt}...", file=sys.stderr)
+        content = export_task(client, task_id, fmt, lang_code)
+
+    out = pathlib.Path(output) if output else audio.with_suffix(f".{fmt}")
+    out.write_bytes(content)
+    print(f"wrote {out} ({len(content)} bytes)")
+    return out
+
+
+def print_plan(plan, register_count, margin, fresh_threshold) -> None:
+    """Print the allocation plan to stderr (design format)."""
+    print(f"plan (margin {margin}, fresh {fresh_threshold}):", file=sys.stderr)
+    for audio, target in plan:
+        if isinstance(target, str):
+            print(f"  {audio.name:<20} -> {target}", file=sys.stderr)
+        else:
+            rem = cached_remaining(target)
+            print(f"  {audio.name:<20} -> {target.get('email')} (rem {rem})", file=sys.stderr)
+    print(f"need new: {register_count}", file=sys.stderr)
+
+
+def print_summary(results) -> None:
+    """Print the per-file success/failure summary to stdout (design format)."""
+    ok = sum(1 for r in results if r[2] == "OK")
+    failed = len(results) - ok
+    print(f"summary: {ok} ok, {failed} failed")
+    for audio, email, status, detail in results:
+        print(f"  {status:<4}  {audio.name:<20} -> {email}   {detail}")
+
+
+def cmd_transcribe(args: argparse.Namespace) -> int:
     cfg = load_config(pathlib.Path(args.config))
     # flag overrides
     if args.lang is not None:
@@ -799,70 +871,94 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     cfg["language_code"] = resolve_language(cfg["language"])
 
-    # --- validate file ---
-    size = audio.stat().st_size
-    if size > MAX_FILE_BYTES:
-        raise SystemExit(f"file is {size/1e6:.1f} MB > 1000 MB limit")
-    duration = audio_duration(audio)
-    if duration is None:
-        print("note: ffprobe unavailable — audio duration not checked", file=sys.stderr)
-    elif duration > FREE_DURATION_WARN_SECS:
-        print(f"warn: audio is {duration:.0f}s ({duration/60:.1f} min) > "
-              f"{FREE_DURATION_WARN_SECS}s free-account soft limit", file=sys.stderr)
+    # --- validate files: drop missing/oversize with a warning (skip & continue) ---
+    files: list[pathlib.Path] = []
+    for p in args.audios:
+        audio = pathlib.Path(p)
+        if not audio.exists():
+            print(f"warn: audio not found, skipping: {audio}", file=sys.stderr)
+            continue
+        size = audio.stat().st_size
+        if size > MAX_FILE_BYTES:
+            print(f"warn: {audio} is {size/1e6:.1f} MB > 1000 MB limit, skipping", file=sys.stderr)
+            continue
+        files.append(audio)
+    if not files:
+        raise SystemExit("no valid audio files to transcribe")
+    if len(files) > 1 and args.output:
+        raise SystemExit("-o/--output only valid with a single file; "
+                         "multiple files default to each <name>.<fmt>")
 
+    config_path = pathlib.Path(args.config)
     store = load_accounts()
-    acfg = accounts_config(pathlib.Path(args.config))
-    required = estimate_required(duration)
-    chosen, info = select_account(store["accounts"], required, acfg["selection_margin"], store)
-    if info:
-        print("  candidates: " + ", ".join(f"{em}(rem={r})" for em, r in info), file=sys.stderr)
-    if chosen is None:
-        if has_temp_email_config(pathlib.Path(args.config)):
-            print(f"no sufficient account (required~{required}); registering one...", file=sys.stderr)
-            chosen = register_one()
-            upsert_account(store, chosen)
-            save_accounts(store)
-        else:
-            chosen = active_account(store)
-            if chosen is None:
-                raise SystemExit("no accounts — run `stt login` or configure temp-email + `stt pool warm`")
-            print(f"warn: no account confirmed sufficient (required~{required}); "
-                  f"using {chosen.get('email')} best-effort", file=sys.stderr)
-    else:
-        print(f"selected {chosen.get('email')} (remaining={cached_remaining(chosen)}, "
-              f"required~{required})", file=sys.stderr)
-    store["active"] = chosen["email"]
-    save_accounts(store)  # persist active pointer / credits_known / jwt updates from the selection pass
-    account = chosen
-    # ponytail: account dict reuses the session shape, so get_jwt/authed_client work as-is;
-    # the save callback persists Firebase's rotated refresh token back into accounts.json.
-    with authed_client(account, save=lambda _s: save_accounts(store)) as client:
-        if cfg["show_cost"] and duration:
-            credits = get_cost(client, duration)
-            if credits is not None:
-                print(f"estimated cost: {credits} credits", file=sys.stderr)
+    acfg = accounts_config(config_path)
 
-        print(f"uploading {audio.name} ({size/1e6:.1f} MB)...", file=sys.stderr)
-        task = create_task(client, audio, cfg)
-        task_id = task["_id"]
-        print(f"  task {task_id} state={task.get('state')}", file=sys.stderr)
+    # per-file cost; warn on long clips (soft free-account limit)
+    costs: list[tuple[pathlib.Path, int | None]] = []
+    for audio in files:
+        duration = audio_duration(audio)
+        if duration is None:
+            print(f"note: ffprobe unavailable — {audio.name} duration unknown "
+                  f"(needs its own fresh account)", file=sys.stderr)
+        elif duration > FREE_DURATION_WARN_SECS:
+            print(f"warn: {audio.name} is {duration:.0f}s ({duration/60:.1f} min) > "
+                  f"{FREE_DURATION_WARN_SECS}s free-account soft limit", file=sys.stderr)
+        costs.append((audio, estimate_required(duration)))
 
-        result = poll_task(client, task_id, cfg["poll_timeout_secs"])
-        lang_code = (result.get("result") or {}).get("language_code")
+    # refresh live remaining for non-invalid accounts so the plan is accurate
+    accounts = [a for a in store["accounts"] if not a.get("invalid")]
+    for a in accounts:
+        account_remaining(a, store)
+    save_accounts(store)
 
-        fmt = cfg["export_format"]
-        print(f"exporting {fmt}...", file=sys.stderr)
-        content = export_task(client, task_id, fmt, lang_code)
+    plan, register_count = allocate(costs, accounts, acfg["selection_margin"],
+                                    acfg["fresh_threshold"], store)
+    print_plan(plan, register_count, acfg["selection_margin"], acfg["fresh_threshold"])
 
-    out = pathlib.Path(args.output) if args.output else audio.with_suffix(f".{fmt}")
-    out.write_bytes(content)
-    print(f"wrote {out} ({len(content)} bytes)")
-    account_remaining(account, store, force=True)  # refresh post-use credits before refill decision
+    if args.dry_run:
+        return 0
+
+    if register_count and not has_temp_email_config(config_path):
+        raise SystemExit(f"need {register_count} more account(s) but [temp_email] not configured")
+
+    # register the exact shortfall up-front, then bind NEW#k slots -> registered accounts
+    new: list[dict[str, Any]] = []
+    for _ in range(register_count):
+        acct = register_one()
+        upsert_account(store, acct)
+        new.append(acct)
+    if register_count:
+        save_accounts(store)
+    resolved = [(audio, new[int(t.split("#")[1])] if isinstance(t, str) else t)
+                for audio, t in plan]
+
+    results = []
+    used: list[dict[str, Any]] = []
+    single = len(files) == 1
+    for audio, account in resolved:
+        email = account.get("email")
+        store["active"] = email
+        save_accounts(store)
+        if account not in used:
+            used.append(account)
+        try:
+            out = transcribe_one(audio, cfg, account, store, config_path,
+                                 args.output if single else None)
+            results.append((audio, email, "OK", str(out)))
+        except Exception as e:  # skip & continue
+            print(f"warn: {audio.name} failed: {e!r}", file=sys.stderr)
+            results.append((audio, email, "FAIL", repr(e)))
+
+    for a in used:
+        # ponytail: ElevenLabs debits credits asynchronously — this refresh can race
+        # the debit and record a still-high remaining; margin + next-run refresh absorb the lag.
+        account_remaining(a, store, force=True)  # refresh post-use credits before refill decision
     try:
-        refill_pool(store, pathlib.Path(args.config))
+        refill_pool(store, config_path)
     except KeyboardInterrupt:
         print("pool refill skipped (interrupted)", file=sys.stderr)
-    return 0
+    print_summary(results)
+    return 0 if all(r[2] == "OK" for r in results) else 1
 
 
 def cmd_list_languages(args: argparse.Namespace) -> int:
@@ -911,13 +1007,38 @@ def _selfcheck() -> int:
     assert extract_oob_code(sample_link) == "ABC_def-123"
     pw = random_password()
     assert len(pw) >= 8 and any(c.isdigit() for c in pw) and any(not c.isalnum() for c in pw)
-    chosen, info = select_account(fake, required=800, margin=1.2, store=fstore)
-    # needed = 800*1.2+1 = 961; a(1000) & b(10000) sufficient; best-fit picks smallest => a
-    assert chosen["email"] == "a", f"best-fit should pick a, got {chosen and chosen['email']}"
-    assert len(info) == 2  # invalid account 'c' skipped
     assert fresh_count(fstore, 10000) == 1 and fresh_count(fstore, 1000) == 2
-    assert select_account(fake, required=9000, margin=1.2, store=fstore)[0] is None  # needed=10801
-    assert select_account(fake, required=None, margin=1.2, store=fstore)[0]["email"] == "a"  # active fallback
+    # allocate: bin-packing best-fit, existing-first, exact shortfall (offline via credits_known)
+    aa = {"email": "a", "invalid": False, "credits_known": {"limit": 1000, "count": 0, "fetched_at": now}}
+    # b sized so 7000 can't fit it (forces a NEW bin) while 5000+400 do (design mapping).
+    bb = {"email": "b", "invalid": False, "credits_known": {"limit": 6000, "count": 0, "fetched_at": now}}
+    astore = {"accounts": [aa, bb], "active": "a"}
+    # margin 1.0 so need == required; files needing [800, 5000, 7000, 400]
+    plan, reg = allocate([("f800", 800), ("f5000", 5000), ("f7000", 7000), ("f400", 400)],
+                         [aa, bb], margin=1.0, fresh_threshold=10000, store=astore)
+    pd = {f: acct for f, acct in plan}
+    # 7000 fits no existing account (a=1000, b=6000) -> its own fresh bin, exactly one shortfall.
+    assert pd["f7000"] == "NEW#0", "7000 -> fresh bin"
+    assert reg == 1, f"register_count should be 1, got {reg}"
+    # the three that fit are packed onto existing accounts (best-fit, existing-first).
+    assert all(pd[f] in (aa, bb) for f in ("f800", "f5000", "f400")), "small files packed onto existing"
+    # no account over-committed beyond its remaining (with margin 1.0, need == required).
+    used = {"a": 0, "b": 0}
+    for f, req in [("f800", 800), ("f5000", 5000), ("f400", 400)]:
+        used[pd[f]["email"]] += req
+    assert used["a"] <= 1000 and used["b"] <= 6000, f"over-commit: {used}"
+    # existing-account files ordered before the NEW file (AC3)
+    new_idx = next(i for i, (f, acct) in enumerate(plan) if isinstance(acct, str))
+    assert all(not isinstance(acct, str) for f, acct in plan[:new_idx]), "existing before NEW"
+    # unknown-duration file -> own fresh bin, increments register_count
+    plan2, reg2 = allocate([("fu", None)], [aa, bb], margin=1.0, fresh_threshold=10000, store=astore)
+    assert reg2 == 1 and plan2[0][1] == "NEW#0", "unknown duration -> own NEW bin"
+    # a single file bigger than one fresh account -> out-of-scope guard raises
+    try:
+        allocate([("big", 20000)], [aa, bb], margin=1.0, fresh_threshold=10000, store=astore)
+        assert False, "oversize file should raise"
+    except SystemExit:
+        pass
     print("selfcheck ok")
     return 0
 
@@ -1019,8 +1140,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("login", help="one-time browser login → session.json")
 
-    t = sub.add_parser("transcribe", help="transcribe an audio file")
-    t.add_argument("audio", help="path to audio file")
+    t = sub.add_parser("transcribe", help="transcribe one or more audio files")
+    t.add_argument("audios", nargs="+", help="path(s) to audio file(s); multiple run as one batch")
     t.add_argument("-c", "--config", default=str(CONFIG_PATH), help="config.toml path")
     t.add_argument("--lang", help="auto | language name | ISO 639-3 code")
     t.add_argument("--events", action=argparse.BooleanOptionalAction, default=None,
@@ -1036,6 +1157,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("-o", "--output", help="output file path")
     t.add_argument("--show-cost", action="store_true", help="print estimated credit cost")
     t.add_argument("--poll-timeout", type=int, help="poll timeout seconds")
+    t.add_argument("--dry-run", action="store_true",
+                   help="print the allocation plan and exit (no registration, no upload)")
 
     sub.add_parser("list-languages", help="print supported language names + codes")
     sc = sub.add_parser("selfcheck", help="run offline self-check")

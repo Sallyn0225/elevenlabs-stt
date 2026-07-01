@@ -40,7 +40,13 @@ python stt.py login
 # 2) Transcribe (defaults to out.srt)
 python stt.py transcribe audio.m4a -o out.srt
 
-# 3) Force language + vocab + export VTT
+# 3) Batch transcribe (each file writes its own <name>.srt)
+python stt.py transcribe a.mp3 b.mp3 c.mp3
+
+# 4) Preview the allocation plan only — no registration, no upload
+python stt.py transcribe a.mp3 b.mp3 c.mp3 --dry-run
+
+# 5) Force language + vocab + export VTT
 python stt.py transcribe audio.m4a --lang eng --vocab "V社,Major" --format vtt -o out.vtt
 
 # Optional: inspect/warm the multi-account pool
@@ -70,7 +76,7 @@ Copy `config.example.toml` → `config.toml` for persistent defaults; CLI flags 
 
 ```
 stt login              one-time browser login → session.json
-stt transcribe <audio> transcribe an audio file
+stt transcribe <audio> [<audio> ...]  transcribe one or more audio files (batch)
 stt accounts           show accounts and remaining credits
 stt pool status        show fresh/usable/depleted account counts
 stt pool warm          register accounts until the fresh target is met
@@ -90,9 +96,10 @@ stt selfcheck          offline self-check (no network)
 | `--voice-lib / --no-voice-lib` | Use speaker library (default off) |
 | `--vocab` | Comma-separated key terms |
 | `--format` | Export format |
-| `-o, --output` | Output file path |
+| `-o, --output` | Output file path (**single file only**; errors with multiple files, which each default to `<name>.<fmt>`) |
 | `--show-cost` | Print estimated credit cost |
 | `--poll-timeout` | Poll timeout in seconds |
+| `--dry-run` | Print the allocation plan and exit — no registration, no upload |
 
 ## Languages
 
@@ -101,6 +108,19 @@ stt selfcheck          offline self-check (no network)
 ## Multi-account pool (optional)
 
 With `[temp_email]` and `[accounts]` configured, the script can maintain multiple free accounts: it chooses the smallest account that can cover each transcription and refills back to `pool_target` after success. See [`docs/account-pool.en.md`](./docs/account-pool.en.md). Without `[temp_email]`, it stays in normal single-account mode.
+
+## Batch transcription & auto-allocation
+
+`stt transcribe a.mp3 b.mp3 c.mp3` transcribes several files in one run. Before any upload the script:
+
+- estimates each file's credit cost (from duration; a file with unknown duration conservatively claims its own fresh account);
+- **packs onto existing accounts first**: using best-fit bin-packing, multiple files share one account as long as its remaining credits (× `selection_margin`) cover them — draining near-empty accounts first and preserving the big ones;
+- **registers only the shortfall** (缺多少注册多少): only files that fit no existing account trigger new registrations, and exactly that many — existing accounts come first, newly registered accounts last;
+- prints the plan first (`file → account/NEW#k`, `need new: N`), then transcribes sequentially, skipping a failed file and continuing, and finally prints an OK/FAIL summary; exit code is non-zero if any file failed.
+
+`--dry-run` prints the plan and exits without registering or uploading. If `register_count > 0` but `[temp_email]` is not configured, it errors up-front (naming how many accounts are short) before doing any work.
+
+`-o/--output` is single-file only; in a batch each file defaults to its own `<name>.<fmt>`.
 
 ## Limits
 
