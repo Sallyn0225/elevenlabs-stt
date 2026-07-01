@@ -3,3 +3,14 @@
 .codex/
 .agents/
 .trellis/
+
+# STT script runtime artifacts (creds / local config / temp)
+session.json
+config.toml
+_tmp-sample.m4a
+out.srt
+out.vtt
+.playwright-mcp/
+*.png
+__pycache__/
+*.pyc
