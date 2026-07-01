@@ -1,0 +1,12 @@
+# Copy to config.toml and edit. CLI flags override these values.
+
+[transcribe]
+language = "auto"            # "auto" (detect) | ISO 639-3 code (eng, zho, jpn, ...) or name
+tag_audio_events = true      # 标记音频事件 (script default ON)
+include_subtitles = true     # 包含字幕 (script default ON; web default is OFF)
+no_verbatim = false          # 无逐字记录
+use_speaker_library = false  # 从声音库分配声音
+vocab = []                   # key terms, e.g. ["Maj3r", "V社"]
+export_format = "srt"        # srt | vtt | txt | json | html | pdf | docx
+poll_timeout_secs = 600      # max seconds to wait for transcription
+# show_cost = false          # print estimated credit cost before upload

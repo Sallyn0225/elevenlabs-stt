@@ -1,0 +1,4 @@
+httpx
+# login helper only (not needed for transcribe runtime):
+# pip install playwright && playwright install chrome
+playwright
