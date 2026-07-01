@@ -20,6 +20,7 @@
 - 导出 SRT / VTT / TXT / JSON / HTML / PDF / DOCX，默认 SRT
 - 上传前校验：文件大小（1000MB 硬限制）、时长（ffprobe 可选，10 分钟软提醒）
 - 一次性浏览器登录，自动续签 1 小时令牌
+- 可选多账号额度池：自动注册临时邮箱账号、按剩余额度选择账号、转录后自动补池
 
 ## 安装
 
@@ -41,6 +42,10 @@ python stt.py transcribe audio.m4a -o out.srt
 
 # 3) 指定语言 + 词汇 + 导出 VTT
 python stt.py transcribe audio.m4a --lang eng --vocab "V社,Major" --format vtt -o out.vtt
+
+# 可选：查看/预热多账号额度池
+python stt.py pool status
+python stt.py pool warm --target 3
 ```
 
 登录会把 Firebase **refresh token** 存到 `session.json`（已 gitignore）。1 小时的 JWT 每次运行自动续签；仅在 refresh token 本身过期或报鉴权错误时重跑 `login`。
@@ -66,6 +71,9 @@ python stt.py transcribe audio.m4a --lang eng --vocab "V社,Major" --format vtt 
 ```
 stt login              一次性浏览器登录 → session.json
 stt transcribe <audio> 转录音频文件
+stt accounts           查看账号与剩余额度
+stt pool status        查看 fresh/usable/depleted 账号数量
+stt pool warm          注册账号直到达到 fresh 目标
 stt list-languages     打印支持的语言名 + 代码
 stt selfcheck          离线自检（不联网）
 ```
@@ -90,6 +98,10 @@ stt selfcheck          离线自检（不联网）
 
 `--lang` 接受 `auto`（自动检测，默认）、语言名（如 `english`），或任意 ISO 639-3 代码（如 `eng`/`zho`/`jpn`）。运行 `python stt.py list-languages` 查看已内置的语言表。
 
+## 多账号额度池（可选）
+
+配置 `[temp_email]` 和 `[accounts]` 后，脚本可以维护多个免费账号：转录时自动选择够用且剩余额度最小的账号，成功后按 `pool_target` 自动补池。详见 [`docs/account-pool.md`](./docs/account-pool.md)。不配置 `[temp_email]` 时仍是普通单账号模式。
+
 ## 限制
 
 - **文件大小**：1000 MB 硬限制，超出在上传前拒绝。
@@ -111,6 +123,8 @@ stt selfcheck          离线自检（不联网）
 | `config.example.toml` | 配置示例 |
 | `requirements.txt` | 依赖 |
 | `session.json` | `login` 生成（凭证，已 gitignore） |
+| `accounts.json` | 多账号池生成（凭证，已 gitignore） |
+| `docs/account-pool.md` | 多账号池与自动注册说明 |
 
 ## 自检
 
