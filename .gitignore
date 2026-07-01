@@ -1,0 +1,5 @@
+# AI agent / IDE config directories
+.claude/
+.codex/
+.agents/
+.trellis/
