@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/07-01-elevenlabs-stt-script/research/api-contract.md", "reason": "Verify implemented HTTP calls match the captured contract: exact endpoint paths, multipart field names (keyterms vs biased_keywords, language_code ISO 639-3, omitted-when-default fields), export body {language_code}, auth Bearer header."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check that config loading, session handling, and the httpx client are not duplicated across subcommands."}

@@ -1,0 +1,26 @@
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW
+Content-Disposition: form-data; name="task_name"
+
+_tmp-sample.m4a
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW
+Content-Disposition: form-data; name="file"; filename="_tmp-sample.m4a"
+Content-Type: audio/x-m4a
+
+
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW
+Content-Disposition: form-data; name="model_id"
+
+scribe_v2
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW
+Content-Disposition: form-data; name="tag_audio_events"
+
+true
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW
+Content-Disposition: form-data; name="include_subtitles"
+
+true
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW
+Content-Disposition: form-data; name="keyterms"
+
+ElevenLabs
+------WebKitFormBoundary7JBD2YvAIJ7D9HiW--
