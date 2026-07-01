@@ -598,66 +598,76 @@ def register_one() -> dict[str, Any]:
 
     before_windows = {window_key(w) for w in gw.getAllWindows()
                       if "Google Chrome" in w.title}
-    subprocess.Popen([
-        chrome,
-        f"--user-data-dir={profile_dir}",
-        "--no-first-run",
-        "--new-window",
-        "--window-position=40,40",
-        "--disable-save-password-bubble",
-        "https://elevenlabs.io/app/sign-up",
-    ])
-    new_window = None
-    deadline = time.time() + 10
-    while time.time() < deadline and new_window is None:
-        time.sleep(0.5)
-        for w in gw.getAllWindows():
-            if "Google Chrome" in w.title and window_key(w) not in before_windows:
-                new_window = w
-                break
-    if new_window is None:
-        raise SystemExit("auto-register could not find the new temporary Chrome window; aborting")
-    new_window.restore(); new_window.activate(); new_window.maximize()
-    time.sleep(4)
+    proc = None
+    try:
+        proc = subprocess.Popen([
+            chrome,
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--new-window",
+            "--window-position=40,40",
+            "--disable-save-password-bubble",
+            "https://elevenlabs.io/app/sign-up",
+        ])
+        new_window = None
+        deadline = time.time() + 10
+        while time.time() < deadline and new_window is None:
+            time.sleep(0.5)
+            for w in gw.getAllWindows():
+                if "Google Chrome" in w.title and window_key(w) not in before_windows:
+                    new_window = w
+                    break
+        if new_window is None:
+            raise SystemExit("auto-register could not find the new temporary Chrome window; aborting")
+        new_window.restore(); new_window.activate(); new_window.maximize()
+        time.sleep(4)
 
-    def click_frac(x_frac: float, y_frac: float) -> None:
-        pyautogui.click(new_window.left + int(new_window.width * x_frac),
-                        new_window.top + int(new_window.height * y_frac))
+        def click_frac(x_frac: float, y_frac: float) -> None:
+            pyautogui.click(new_window.left + int(new_window.width * x_frac),
+                            new_window.top + int(new_window.height * y_frac))
 
-    def paste(text: str) -> None:
-        pyperclip.copy(text)
-        pyautogui.hotkey("ctrl", "v")
+        def paste(text: str) -> None:
+            pyperclip.copy(text)
+            pyautogui.hotkey("ctrl", "v")
 
-    pyautogui.hotkey("ctrl", "l")
-    paste("https://elevenlabs.io/app/sign-up")
-    pyautogui.press("enter")
-    time.sleep(12)
+        pyautogui.hotkey("ctrl", "l")
+        paste("https://elevenlabs.io/app/sign-up")
+        pyautogui.press("enter")
+        time.sleep(12)
 
-    click_frac(0.50, 0.56)  # signup email
-    pyautogui.hotkey("ctrl", "a"); paste(email)
-    pyautogui.press("tab"); paste(password)
-    pyautogui.press("enter")
+        click_frac(0.50, 0.56)  # signup email
+        pyautogui.hotkey("ctrl", "a"); paste(email)
+        pyautogui.press("tab"); paste(password)
+        pyautogui.press("enter")
 
-    link = latest_verify_link(addr["jwt"])
-    pyautogui.hotkey("ctrl", "l")
-    paste(link)
-    pyautogui.press("enter")
-    time.sleep(15)
-    pyautogui.press("enter")  # modal Continue if focused
-    click_frac(0.50, 0.62)
-    click_frac(0.65, 0.62)  # verification modal Continue fallback
-    time.sleep(8)
-    click_frac(0.50, 0.62)  # sign-in email
-    pyautogui.hotkey("ctrl", "a"); paste(email)
-    pyautogui.press("tab"); paste(password)
-    pyautogui.press("enter")
-    time.sleep(15)
+        link = latest_verify_link(addr["jwt"])
+        pyautogui.hotkey("ctrl", "l")
+        paste(link)
+        pyautogui.press("enter")
+        time.sleep(15)
+        pyautogui.press("enter")  # modal Continue if focused
+        click_frac(0.50, 0.62)
+        click_frac(0.65, 0.62)  # verification modal Continue fallback
+        time.sleep(8)
+        click_frac(0.50, 0.62)  # sign-in email
+        pyautogui.hotkey("ctrl", "a"); paste(email)
+        pyautogui.press("tab"); paste(password)
+        pyautogui.press("enter")
+        time.sleep(15)
 
-    account = account_from_password_signin(email, password, temp_address=email)
-    with authed_client(account, save=lambda _s: None) as client:
-        client.get("/v1/user")
-        refresh_credits(account, client)
-    return account
+        account = account_from_password_signin(email, password, temp_address=email)
+        with authed_client(account, save=lambda _s: None) as client:
+            client.get("/v1/user")
+            refresh_credits(account, client)
+        return account
+    finally:
+        if proc is not None:
+            if shutil.which("taskkill"):
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                proc.terminate()
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def fresh_count(store: dict[str, Any], threshold: int) -> int:
