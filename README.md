@@ -125,6 +125,7 @@ stt selfcheck          离线自检（不联网）
 | `session.json` | `login` 生成（凭证，已 gitignore） |
 | `accounts.json` | 多账号池生成（凭证，已 gitignore） |
 | `docs/account-pool.md` | 多账号池与自动注册说明 |
+| `docs/api-contract.md` | 抓包得到的内部 API 契约 |
 
 ## 自检
 
