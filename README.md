@@ -72,6 +72,21 @@ python stt.py pool warm --target 3
 | `poll_timeout_secs` | 轮询超时秒数 | `600` |
 | `show_cost` | 上传前打印预估积分成本 | `false` |
 
+## 本地 Web UI（可选）
+
+命令行之外，`web.py` 用标准库起一个本地网页，复用 `stt.py` 的转录与账号逻辑：
+
+```bash
+python web.py            # 打开 http://127.0.0.1:8756
+```
+
+- **转录页**：拖拽/多选音频 → 浏览器测时长并预估积分 → 按剩余额度自动分配账号（best-fit）→ 「开始转录」真实上传、轮询、导出，完成后自动下载字幕。
+- **账号管理页**：读取 `accounts.json`，支持搜索/排序/多选、真实刷新额度、删除、导出 JSON。
+- 「登录」与「注册机」为 UI 展示，实际请用 CLI `python stt.py login` / `pool warm` 后点「刷新列表」。
+- 账号池不足以覆盖所有文件时，页面会提示先 `pool warm`，不会静默注册。
+
+零额外依赖、零构建；须在项目根目录运行（需 `accounts.json`、`config.toml`）。
+
 ## 命令参考
 
 ```
