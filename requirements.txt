@@ -1,4 +1,7 @@
 httpx
-# login helper only (not needed for transcribe runtime):
+# browser helpers only (not needed for single-account transcribe runtime):
 # pip install playwright && playwright install chrome
 playwright
+pyautogui
+pygetwindow
+pyperclip
