@@ -10,3 +10,21 @@ vocab = []                   # key terms, e.g. ["Maj3r", "V社"]
 export_format = "srt"        # srt | vtt | txt | json | html | pdf | docx
 poll_timeout_secs = 600      # max seconds to wait for transcription
 # show_cost = false          # print estimated credit cost before upload
+
+# Multi-account pool & auto-registration. Leave commented to use a single
+# `stt login`-imported account (graceful single-account mode).
+
+[temp_email]
+base_url = "https://mail.example.com"   # your cloudflare_temp_email backend
+admin_password = ""                      # x-admin-auth; preferred path (bypasses gates)
+site_password = ""                       # x-custom-auth, only if /open_api/settings needAuth
+domain = "example.com"                   # a domain from /open_api/settings domains[]
+use_admin_path = true                    # /admin/new_address vs /api/new_address
+poll_interval_secs = 3
+poll_timeout_secs = 120
+
+[accounts]
+pool_target = 3                          # keep this many fresh (full-quota) accounts
+fresh_threshold = 10000                  # remaining >= this counts as "fresh"
+selection_margin = 1.2                   # require remaining >= cost * margin
+auto_refill = true                       # refill pool to target after each transcription

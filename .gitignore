@@ -6,6 +6,7 @@
 
 # STT script runtime artifacts (creds / local config / temp)
 session.json
+accounts.json
 config.toml
 _tmp-sample.m4a
 out.srt

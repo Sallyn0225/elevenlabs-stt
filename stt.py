@@ -25,14 +25,18 @@ FIREBASE_API_KEY = "AIzaSyBSsRE_1Os04-bxpd5JTLIniy3UK4OqKys"
 FIREBASE_USER_KEY = f"firebase:authUser:{FIREBASE_API_KEY}:[DEFAULT]"
 API_BASE = "https://api.us.elevenlabs.io"
 SECURETOKEN_URL = f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}"
+FIREBASE_REFERER = "https://elevenlabs.io/"  # API key is referer-restricted; required on googleapis calls
 LOGIN_URL = "https://elevenlabs.io/app/speech-to-text"
 
-SESSION_PATH = pathlib.Path("session.json")
+SESSION_PATH = pathlib.Path("session.json")  # legacy single-account file (migration source)
+ACCOUNTS_PATH = pathlib.Path("accounts.json")  # multi-account pool (migration target)
 CONFIG_PATH = pathlib.Path("config.toml")
 
 MAX_FILE_BYTES = 1000 * 1024 * 1024  # 1000 MB hard limit
 FREE_DURATION_WARN_SECS = 600  # 10 min soft warn for free accounts
 POLL_INTERVAL_SECS = 3
+CREDITS_PER_SEC = 13.9  # observed free-tier STT rate (research); pre-flight estimate
+CREDITS_CACHE_TTL = 300  # reuse fetched credits within this window to limit token rotations
 
 EXPORT_FORMATS = ("srt", "vtt", "txt", "json", "html", "pdf", "docx")
 
@@ -46,6 +50,23 @@ DEFAULTS: dict[str, Any] = {
     "export_format": "srt",
     "poll_timeout_secs": 600,
     "show_cost": False,
+}
+
+# ponytail: section defaults kept as flat dicts; merged over by config.toml sections
+TEMP_EMAIL_DEFAULTS: dict[str, Any] = {
+    "base_url": "",            # cloudflare_temp_email backend URL
+    "admin_password": "",      # x-admin-auth (admin path; bypasses gates)
+    "site_password": "",       # x-custom-auth, only if /open_api/settings needAuth
+    "domain": "",              # a domain from /open_api/settings domains[]
+    "use_admin_path": True,    # /admin/new_address vs /api/new_address
+    "poll_interval_secs": 3,
+    "poll_timeout_secs": 120,
+}
+ACCOUNTS_CFG_DEFAULTS: dict[str, Any] = {
+    "pool_target": 3,          # desired count of fresh (full-quota) accounts
+    "fresh_threshold": 10000,  # remaining >= this => "fresh"
+    "selection_margin": 1.2,   # require remaining >= cost * margin
+    "auto_refill": True,       # refill pool to target after each transcription
 }
 
 # Language name -> ISO 639-3 code. Subset of the web combobox's 157 entries;
@@ -85,15 +106,32 @@ LANGUAGES: dict[str, str] = {
 
 # ---------------------------------------------------------------- config
 
+def load_toml(path: pathlib.Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("rb") as fh:
+        return tomllib.load(fh)
+
+
 def load_config(path: pathlib.Path) -> dict[str, Any]:
     cfg = dict(DEFAULTS)
-    if path.exists():
-        with path.open("rb") as fh:
-            data = tomllib.load(fh)
-        if "transcribe" in data:
-            cfg.update(data["transcribe"])
-        else:
-            cfg.update(data)
+    data = load_toml(path)
+    if "transcribe" in data:
+        cfg.update(data["transcribe"])
+    else:
+        cfg.update(data)
+    return cfg
+
+
+def temp_email_config(path: pathlib.Path = CONFIG_PATH) -> dict[str, Any]:
+    cfg = dict(TEMP_EMAIL_DEFAULTS)
+    cfg.update(load_toml(path).get("temp_email", {}))
+    return cfg
+
+
+def accounts_config(path: pathlib.Path = CONFIG_PATH) -> dict[str, Any]:
+    cfg = dict(ACCOUNTS_CFG_DEFAULTS)
+    cfg.update(load_toml(path).get("accounts", {}))
     return cfg
 
 
@@ -117,6 +155,7 @@ def resolve_language(value: str) -> str | None:
 # ----------------------------------------------------------- session/auth
 
 def load_session() -> dict[str, Any]:
+    """Legacy single-account file. Used only as the migration source."""
     if not SESSION_PATH.exists():
         raise SystemExit("no session — run `stt login` first")
     with SESSION_PATH.open("r", encoding="utf-8") as fh:
@@ -131,17 +170,100 @@ def save_session(s: dict[str, Any]) -> None:
         pass
 
 
-def get_jwt(session: dict[str, Any]) -> str:
+# --- multi-account store -----------------------------------------------
+
+def _session_to_account(sess: dict[str, Any], source: str) -> dict[str, Any]:
+    """Normalise a legacy session dict into an account record."""
+    return {
+        "email": sess.get("email"),
+        "refreshToken": sess.get("refreshToken"),
+        "localId": sess.get("localId"),
+        "jwt": sess.get("jwt"),
+        "jwt_exp": sess.get("jwt_exp", 0),
+        "apiKey": sess.get("apiKey", FIREBASE_API_KEY),
+        "source": source,            # "manual" | "auto"
+        "temp_address": sess.get("temp_address"),  # temp email used at signup (recovery)
+        "created_at": sess.get("created_at") or time.time(),
+        "credits_known": sess.get("credits_known"),  # {limit,count,fetched_at} or None
+        "invalid": sess.get("invalid", False),
+        "invalid_reason": sess.get("invalid_reason"),
+    }
+
+
+def save_accounts(store: dict[str, Any]) -> None:
+    ACCOUNTS_PATH.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(ACCOUNTS_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def migrate_session_if_needed() -> None:
+    """One-time: fold legacy session.json into accounts.json. Never deletes session.json."""
+    if ACCOUNTS_PATH.exists() or not SESSION_PATH.exists():
+        return
+    sess = load_session()
+    if not sess.get("refreshToken"):
+        return
+    store = {"accounts": [_session_to_account(sess, source="manual")],
+             "active": sess.get("email")}
+    save_accounts(store)
+    print(f"migrated {SESSION_PATH} -> {ACCOUNTS_PATH} (email={sess.get('email')})",
+          file=sys.stderr)
+
+
+def load_accounts() -> dict[str, Any]:
+    migrate_session_if_needed()
+    if ACCOUNTS_PATH.exists():
+        with ACCOUNTS_PATH.open("r", encoding="utf-8") as fh:
+            store = json.load(fh)
+        store.setdefault("accounts", [])
+        store.setdefault("active", None)
+        return store
+    return {"accounts": [], "active": None}
+
+
+def upsert_account(store: dict[str, Any], account: dict[str, Any]) -> None:
+    """Insert or update (by email) an account in the store; mark it active."""
+    accts = store["accounts"]
+    for i, a in enumerate(accts):
+        if a.get("email") == account["email"]:
+            # preserve bookkeeping across re-login/re-register
+            account["created_at"] = a.get("created_at") or account["created_at"]
+            if account.get("credits_known") is None:
+                account["credits_known"] = a.get("credits_known")
+            accts[i] = account
+            break
+    else:
+        accts.append(account)
+    store["active"] = account["email"]
+
+
+def active_account(store: dict[str, Any]) -> dict[str, Any] | None:
+    """The last-used account, else the first non-invalid account."""
+    accts = store["accounts"]
+    target = store.get("active")
+    for a in accts:
+        if a.get("email") == target and not a.get("invalid"):
+            return a
+    for a in accts:
+        if not a.get("invalid"):
+            return a
+    return accts[0] if accts else None
+
+
+def get_jwt(session: dict[str, Any], save=None) -> str:
     jwt = session.get("jwt")
     exp = session.get("jwt_exp", 0)
     if jwt and exp > time.time() + 60:
         return jwt
     rt = session.get("refreshToken")
     if not rt:
-        raise SystemExit("session has no refresh token — re-run `stt login`")
+        raise SystemExit("account has no refresh token — re-login or register a new one")
     resp = httpx.post(
         SECURETOKEN_URL,
         data={"grant_type": "refresh_token", "refresh_token": rt},
+        headers={"Referer": FIREBASE_REFERER},  # API key is referer-restricted
         timeout=30,
     )
     if resp.status_code != 200:
@@ -153,12 +275,13 @@ def get_jwt(session: dict[str, Any]) -> str:
     session["jwt_exp"] = time.time() + int(data.get("expires_in", 3600)) - 60
     if data.get("refresh_token"):
         session["refreshToken"] = data["refresh_token"]
-    save_session(session)
+    # Firebase rotates refresh tokens; persist immediately so the account isn't lost.
+    (save or save_session)(session)
     return session["jwt"]
 
 
-def authed_client(session: dict[str, Any]) -> httpx.Client:
-    jwt = get_jwt(session)
+def authed_client(session: dict[str, Any], save=None) -> httpx.Client:
+    jwt = get_jwt(session, save)
     return httpx.Client(
         base_url=API_BASE,
         headers={"Authorization": f"Bearer {jwt}"},
@@ -249,6 +372,87 @@ def export_task(client: httpx.Client, task_id: str, fmt: str, lang_code: str | N
     return r.content
 
 
+# --- credits / selection ----------------------------------------------
+
+def estimate_required(duration: float | None) -> int | None:
+    """Pre-flight credit estimate from audio duration (no network)."""
+    if not duration:
+        return None
+    return int(duration * CREDITS_PER_SEC) + 1
+
+
+def has_temp_email_config(path: pathlib.Path = CONFIG_PATH) -> bool:
+    t = temp_email_config(path)
+    return bool(t["base_url"] and t["domain"] and (t["admin_password"] or t["site_password"]))
+
+
+def refresh_credits(account: dict[str, Any], client: httpx.Client) -> int | None:
+    """GET /v1/user/subscription -> store into account.credits_known; return remaining."""
+    r = client.get("/v1/user/subscription")
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    sub = data.get("subscription") or data  # /v1/user nests it; /v1/user/subscription is flat
+    limit = sub.get("character_limit", 0)
+    count = sub.get("character_count", 0)
+    account["credits_known"] = {"limit": limit, "count": count, "fetched_at": time.time()}
+    return max(0, limit - count)
+
+
+def cached_remaining(account: dict[str, Any]) -> int | None:
+    ck = account.get("credits_known")
+    if not ck:
+        return None
+    return max(0, ck.get("limit", 0) - ck.get("count", 0))
+
+
+def account_remaining(account: dict[str, Any], store: dict[str, Any], force: bool = False) -> int | None:
+    """Remaining credits for an account. Uses cache within TTL, else fetches (network).
+    On repeated auth failure, quarantines the account as invalid (R3)."""
+    ck = account.get("credits_known")
+    if not force and ck and time.time() - ck.get("fetched_at", 0) < CREDITS_CACHE_TTL:
+        return cached_remaining(account)
+    try:
+        with authed_client(account, save=lambda _s: save_accounts(store)) as client:
+            rem = refresh_credits(account, client)
+            if rem is not None:  # success → clear any prior auth-failure state
+                account["auth_fails"] = 0
+                account["invalid"] = False
+                account["invalid_reason"] = None
+        save_accounts(store)  # persist credits_known + state (JWT rotation already saved above)
+        return rem
+    except (Exception, SystemExit) as e:
+        account["auth_fails"] = account.get("auth_fails", 0) + 1
+        if account["auth_fails"] >= 3:
+            account["invalid"] = True
+            account["invalid_reason"] = str(e)[:120]
+        save_accounts(store)  # persist auth-fail / quarantine state
+        return None
+
+
+def select_account(accounts: list[dict[str, Any]], required: int | None,
+                    margin: float, store: dict[str, Any]) -> tuple[dict[str, Any] | None, list]:
+    """Best-fit + margin: the smallest remaining that covers required*margin.
+    Returns (chosen_or_None, [(email, remaining), ...]) for logging. If required is
+    None (duration unknown), falls back to the active account without a sufficiency check."""
+    if required is None:
+        return active_account(store), []
+    needed = int(required * margin) + 1
+    sufficient: list[tuple[dict, int]] = []
+    info: list[tuple[str | None, int | None]] = []
+    for a in accounts:
+        if a.get("invalid"):
+            continue
+        rem = account_remaining(a, store)
+        info.append((a.get("email"), rem))
+        if rem is not None and rem >= needed:
+            sufficient.append((a, rem))
+    if not sufficient:
+        return None, info
+    chosen, _ = min(sufficient, key=lambda ar: ar[1])
+    return chosen, info
+
+
 # ------------------------------------------------------------- subcommands
 
 def cmd_login(args: argparse.Namespace) -> int:
@@ -292,8 +496,11 @@ def cmd_login(args: argparse.Namespace) -> int:
     }
     if not session["refreshToken"]:
         raise SystemExit("login did not yield a refresh token — re-run `stt login`")
-    save_session(session)
-    print(f"saved {SESSION_PATH} (email={session['email']})")
+    store = load_accounts()
+    account = _session_to_account(session, source="manual")
+    upsert_account(store, account)
+    save_accounts(store)
+    print(f"saved {ACCOUNTS_PATH} (email={account['email']})")
     return 0
 
 
@@ -336,8 +543,30 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         print(f"warn: audio is {duration:.0f}s ({duration/60:.1f} min) > "
               f"{FREE_DURATION_WARN_SECS}s free-account soft limit", file=sys.stderr)
 
-    session = load_session()
-    with authed_client(session) as client:
+    store = load_accounts()
+    acfg = accounts_config(pathlib.Path(args.config))
+    required = estimate_required(duration)
+    chosen, info = select_account(store["accounts"], required, acfg["selection_margin"], store)
+    if info:
+        print("  candidates: " + ", ".join(f"{em}(rem={r})" for em, r in info), file=sys.stderr)
+    if chosen is None:
+        if has_temp_email_config(pathlib.Path(args.config)):
+            # ponytail: on-demand auto-register lands in Step 5; placeholder until then.
+            raise SystemExit(
+                f"no account has enough credits (required~{required}) — auto-register not yet wired")
+        chosen = active_account(store)
+        if chosen is None:
+            raise SystemExit("no accounts — run `stt login` or configure temp-email + `stt pool warm`")
+        print(f"warn: no account confirmed sufficient (required~{required}); "
+              f"using {chosen.get('email')} best-effort", file=sys.stderr)
+    else:
+        print(f"selected {chosen.get('email')} (remaining={cached_remaining(chosen)}, "
+              f"required~{required})", file=sys.stderr)
+    save_accounts(store)  # persist credits_known / jwt updates from the selection pass
+    account = chosen
+    # ponytail: account dict reuses the session shape, so get_jwt/authed_client work as-is;
+    # the save callback persists Firebase's rotated refresh token back into accounts.json.
+    with authed_client(account, save=lambda _s: save_accounts(store)) as client:
         if cfg["show_cost"] and duration:
             credits = get_cost(client, duration)
             if credits is not None:
@@ -385,7 +614,104 @@ def _selfcheck() -> int:
     data = {"task_name": "x", "model_id": "scribe_v2",
             "tag_audio_events": "true", "include_subtitles": "true", "keyterms": ["a", "b"]}
     assert data["keyterms"] == ["a", "b"]
+    # multi-account config sections + migration shape
+    tcfg = temp_email_config(pathlib.Path("config.example.toml"))
+    assert tcfg["poll_interval_secs"] == 3 and tcfg["use_admin_path"] is True
+    acfg = accounts_config(pathlib.Path("config.example.toml"))
+    assert acfg["selection_margin"] == 1.2 and acfg["pool_target"] == 3
+    acct = _session_to_account(
+        {"email": "a@b.c", "refreshToken": "rt", "localId": "uid", "jwt": "j", "jwt_exp": 0},
+        source="manual")
+    assert acct["source"] == "manual" and acct["email"] == "a@b.c" and acct["invalid"] is False
+    # selection: best-fit + margin (offline via fresh credits_known cache; no network)
+    now = time.time()
+    fake = [
+        {"email": "a", "invalid": False, "credits_known": {"limit": 10000, "count": 9000, "fetched_at": now}},
+        {"email": "b", "invalid": False, "credits_known": {"limit": 10000, "count": 0, "fetched_at": now}},
+        {"email": "c", "invalid": True,  "credits_known": {"limit": 10000, "count": 0, "fetched_at": now}},
+    ]
+    fstore = {"accounts": fake, "active": "a"}
+    assert cached_remaining(fake[0]) == 1000 and cached_remaining(fake[1]) == 10000
+    chosen, info = select_account(fake, required=800, margin=1.2, store=fstore)
+    # needed = 800*1.2+1 = 961; a(1000) & b(10000) sufficient; best-fit picks smallest => a
+    assert chosen["email"] == "a", f"best-fit should pick a, got {chosen and chosen['email']}"
+    assert len(info) == 2  # invalid account 'c' skipped
+    assert select_account(fake, required=9000, margin=1.2, store=fstore)[0] is None  # needed=10801
+    assert select_account(fake, required=None, margin=1.2, store=fstore)[0]["email"] == "a"  # active fallback
     print("selfcheck ok")
+    return 0
+
+
+# --- account / pool subcommands ---------------------------------------
+
+def cmd_accounts(args: argparse.Namespace) -> int:
+    store = load_accounts()
+    accts = store["accounts"]
+    if not accts:
+        print("no accounts. run `stt login` or (once configured) `stt pool warm`.")
+        return 0
+    if args.refresh:
+        for a in accts:
+            if a.get("invalid"):
+                continue
+            rem = account_remaining(a, store, force=True)
+            print(f"  refreshed {a.get('email')}: rem={rem}", file=sys.stderr)
+        save_accounts(store)
+    active = store.get("active")
+    print(f"{'email':<34} {'src':<7} {'remaining':>9}  state")
+    print("-" * 62)
+    for a in accts:
+        email = a.get("email") or "?"
+        src = a.get("source", "?")
+        rem = cached_remaining(a)
+        if a.get("invalid"):
+            state = "INVALID"
+        elif rem is None:
+            state = "unknown"
+        elif rem == 0:
+            state = "depleted"
+        else:
+            state = "ok"
+        marker = "*" if email == active else " "
+        print(f"{marker}{email:<33} {src:<7} {(str(rem) if rem is not None else '—'):>9}  {state}")
+    return 0
+
+
+def cmd_pool(args: argparse.Namespace) -> int:
+    if args.pool_cmd == "status":
+        return cmd_pool_status(args)
+    return 1
+
+
+def cmd_pool_status(args: argparse.Namespace) -> int:
+    store = load_accounts()
+    acfg = accounts_config(pathlib.Path(args.config))
+    threshold = acfg["fresh_threshold"]
+    target = acfg["pool_target"]
+    fresh = usable = depleted = invalid = unknown = 0
+    for a in store["accounts"]:
+        if a.get("invalid"):
+            invalid += 1; continue
+        rem = cached_remaining(a)
+        if rem is None:
+            unknown += 1
+        elif rem == 0:
+            depleted += 1
+        elif rem >= threshold:
+            fresh += 1
+        else:
+            usable += 1
+    print(f"pool target: {target}")
+    print(f"  fresh (>= {threshold}):    {fresh}")
+    print(f"  usable:           {usable}")
+    print(f"  depleted:         {depleted}")
+    print(f"  unknown (refresh first): {unknown}")
+    print(f"  invalid:          {invalid}")
+    if fresh < target:
+        msg = f"  -> below target by {target - fresh}; run `stt pool warm`"
+        if not has_temp_email_config(pathlib.Path(args.config)):
+            msg += " (temp_email not configured)"
+        print(msg)
     return 0
 
 
@@ -417,6 +743,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("list-languages", help="print supported language names + codes")
     sc = sub.add_parser("selfcheck", help="run offline self-check")
+
+    a = sub.add_parser("accounts", help="list accounts + remaining credits")
+    a.add_argument("-c", "--config", default=str(CONFIG_PATH), help="config.toml path")
+    a.add_argument("--refresh", action="store_true", help="force-refresh credits from the API")
+
+    pool = sub.add_parser("pool", help="account-pool management")
+    psub = pool.add_subparsers(dest="pool_cmd", required=True)
+    ps = psub.add_parser("status", help="show fresh/usable/depleted/invalid counts")
+    ps.add_argument("-c", "--config", default=str(CONFIG_PATH), help="config.toml path")
     return p
 
 
@@ -430,6 +765,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list_languages(args)
     if args.cmd == "selfcheck":
         return _selfcheck()
+    if args.cmd == "accounts":
+        return cmd_accounts(args)
+    if args.cmd == "pool":
+        return cmd_pool(args)
     return 1
 
 
