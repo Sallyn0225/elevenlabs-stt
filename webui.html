@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scribe · 音频转录字幕</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg,#fafafa);color:var(--fg,#171717);font-family:'Geist',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-feature-settings:'liga' 1,'ss05' 1;letter-spacing:-0.02em;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+button{font-family:inherit;letter-spacing:inherit}
+input{font-family:inherit;letter-spacing:inherit}
+::selection{background:rgba(120,120,120,.2)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@keyframes pop{from{opacity:0;transform:scale(.97) translateY(6px)}to{opacity:1;transform:none}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+#toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);z-index:90;background:var(--fg,#171717);color:var(--bg,#fff);font-size:13px;padding:10px 16px;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.2);animation:pop .16s ease;max-width:80vw}
+</style>
+</head>
+<body>
+<div id="app" style="min-height:100vh"></div>
+<script>
+// ------------------------------------------------------------------ themes
+const THEMES = {
+  light:{'--bg':'#fafafa','--panel':'#ffffff','--muted':'#f2f2f2','--muted2':'#fafafa','--border':'#ebebeb','--fg':'#171717','--mut-fg':'#666666','--accent':'#171717','--accent-fg':'#ffffff','--green':'#297a3a','--red':'#e5484d','--amber':'#b45309','--track':'#ebebeb','--shadow':'0 1px 2px rgba(0,0,0,.05)'},
+  dark:{'--bg':'#0a0a0a','--panel':'#151515','--muted':'#1f1f1f','--muted2':'#141414','--border':'#2a2a2a','--fg':'#ededed','--mut-fg':'#a1a1a1','--accent':'#ededed','--accent-fg':'#0a0a0a','--green':'#45dec5','--red':'#e5484d','--amber':'#eec32d','--track':'#2a2a2a','--shadow':'0 1px 2px rgba(0,0,0,.4)'},
+};
+function applyTheme(name){const t=THEMES[name]||THEMES.light;const r=document.documentElement.style;Object.keys(t).forEach(k=>r.setProperty(k,t[k]))}
+
+// ------------------------------------------------------------------- state
+const S = {
+  theme:'light', view:'transcribe',
+  data:null,                 // /api/state payload
+  files:[],                  // {id,name,size,duration,credits,ext,uploading}
+  params:{language:'auto',languageName:'自动检测',format:'srt',vocab:['ElevenLabs'],
+          tag_audio_events:true,include_subtitles:true,no_verbatim:false,
+          use_speaker_library:false,show_cost:false},
+  keyterm:'', langOpen:false, langQuery:'', acctMode:'auto', mode:'batch',
+  plan:null, status:'idle', results:[],
+  // accounts view
+  query:'', sortKey:'created', sortDir:'desc', sortOpen:false,
+  selected:[], revealed:[],
+  loginOpen:false, regOpen:false,
+};
+
+// --------------------------------------------------------------- utilities
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = n => Math.round(n||0).toLocaleString('en-US');
+const humanSize = b => b>=1e6? (b/1e6).toFixed(1)+' MB' : (b/1e3).toFixed(0)+' KB';
+const dur2str = s => { if(s==null) return '—'; s=Math.round(s); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
+function toast(msg){ let t=document.getElementById('toast'); if(t)t.remove(); t=document.createElement('div'); t.id='toast'; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t&&t.remove(),2600); }
+
+async function api(path,opts){ const r=await fetch(path,opts); return r.json(); }
+
+function measureDuration(file){return new Promise(res=>{const a=document.createElement('audio');a.preload='metadata';a.onloadedmetadata=()=>{const d=isFinite(a.duration)?a.duration:null;URL.revokeObjectURL(a.src);res(d)};a.onerror=()=>{res(null)};a.src=URL.createObjectURL(file)})}
+
+function downloadB64(name,b64){const bin=atob(b64);const arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);const url=URL.createObjectURL(new Blob([arr]));const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+
+// ----------------------------------------------------------- style helpers
+const seg=on=>'flex:1;padding:7px 0;text-align:center;font-size:13px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow);border:1px solid var(--border)':'background:transparent;color:var(--mut-fg);border:1px solid transparent');
+const navSeg=on=>'padding:6px 15px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow)':'background:transparent;color:var(--mut-fg)');
+const cbBox=on=>'flex:none;width:19px;height:19px;border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;'+(on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);border:1.5px solid var(--border);color:transparent');
+const CHECK='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+function toggle(on,act){return `<div data-act="${act}" style="flex:none;width:38px;height:22px;border-radius:999px;cursor:pointer;position:relative;`+(on?'background:var(--accent)':'background:var(--muted);border:1px solid var(--border)')+`"><span style="position:absolute;top:2px;${on?'right:2px':'left:2px'};width:18px;height:18px;border-radius:50%;background:`+(on?'var(--accent-fg)':'var(--panel,#fff);box-shadow:var(--shadow)')+`"></span></div>`;}
+
+// ------------------------------------------------------------------ header
+function headerHTML(){
+  const pool=S.data?S.data.pool:{fresh:0,total:0};
+  return `<header style="position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:56px;background:var(--bg);border-bottom:1px solid var(--border)">
+    <div style="display:flex;align-items:center;gap:11px">
+      <svg width="19" height="17" viewBox="0 0 24 22" fill="none"><path d="M12 1 L23 21 L1 21 Z" fill="var(--fg)"></path></svg>
+      <span style="font-size:14px;font-weight:600;letter-spacing:-0.03em">Scribe · 音频转录字幕</span>
+      <span style="font-size:12px;color:var(--mut-fg);border-left:1px solid var(--border);padding-left:11px">ElevenLabs</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <nav style="display:flex;align-items:center;gap:2px;padding:3px;background:var(--muted);border-radius:6px">
+        <button data-act="goTranscribe" style="${navSeg(S.view==='transcribe')}">转录</button>
+        <button data-act="goAccounts" style="${navSeg(S.view==='accounts')}">账号管理</button>
+      </nav>
+      <div style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--mut-fg);border:1px solid var(--border);border-radius:999px;padding:5px 11px">
+        <span style="width:7px;height:7px;border-radius:50%;background:var(--green)"></span>账号池 ${pool.fresh} 满额
+      </div>
+      <button data-act="toggleTheme" style="width:34px;height:34px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center">${S.theme==='dark'?'☾':'☀'}</button>
+    </div>
+  </header>`;
+}
+
+// --------------------------------------------------------- transcribe view
+function fileRowHTML(f,i){
+  const done=S.status==='done';
+  const right = done && !f.failed
+    ? `<button data-act="download" data-arg="${i}" style="flex:none;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12px;font-weight:500;cursor:pointer">下载 ${esc((f.download||'').split('.').pop().toUpperCase())}</button>`
+    : `<div data-act="removeFile" data-arg="${i}" style="flex:none;width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut-fg);cursor:pointer;font-size:13px">✕</div>`;
+  const credits = f.uploading? '…' : (f.credits!=null? fmt(f.credits) : '—');
+  return `<div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
+    <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--mut-fg);border:1px solid var(--border)" class="mono">${esc(f.ext)}</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</div>
+      <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${esc(humanSize(f.size))} · ${esc(dur2str(f.duration))}</div>
+    </div>
+    <div style="flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut-fg);background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 9px" class="mono">≈ ${credits}<span style="opacity:.55">credits</span></div>
+    ${right}
+  </div>`;
+}
+
+function langDropdownHTML(){
+  if(!S.langOpen) return '';
+  const opts=[{name:'自动检测',code:'auto'},...(S.data?S.data.languages:[])];
+  const q=S.langQuery.trim().toLowerCase();
+  const shown=opts.filter(o=>!q||o.name.toLowerCase().includes(q)||o.code.includes(q)).slice(0,60);
+  const rows=shown.map(o=>{const on=S.params.language===o.code;
+    return `<div data-act="pickLang" data-code="${esc(o.code)}" data-name="${esc(o.name)}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;font-size:13.5px;cursor:pointer;${on?'background:var(--muted)':''}">${esc(o.name)} ${o.code!=='auto'?'· <span class="mono" style="color:var(--mut-fg);font-size:11px">'+esc(o.code)+'</span>':''}${on?'<span style="color:var(--green)">✓</span>':''}</div>`;}).join('');
+  return `<div style="position:absolute;top:74px;left:0;right:0;z-index:10;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.12);padding:6px;animation:fadein .12s ease;max-height:320px;overflow:auto">
+    <input data-input="langQuery" value="${esc(S.langQuery)}" placeholder="搜索 ${(S.data?S.data.languages.length:157)} 种语言…" style="width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:4px;border:none;border-bottom:1px solid var(--border);outline:none;background:transparent;color:var(--fg);font-size:13px"/>
+    ${rows}
+    <div style="padding:9px 10px 4px;font-size:11px;color:var(--mut-fg);border-top:1px solid var(--border);margin-top:4px">支持 ISO 639-3 代码,或输入 auto 自动检测</div>
+  </div>`;
+}
+
+function formatChipsHTML(){
+  return (S.data?S.data.formats:['srt']).map(f=>{const on=S.params.format===f;
+    return `<div data-act="pickFormat" data-arg="${f}" class="mono" style="padding:8px 14px;border-radius:6px;font-size:12.5px;font-weight:${on?600:500};cursor:pointer;${on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);color:var(--mut-fg);border:1px solid var(--border)'}">${f.toUpperCase()}</div>`;}).join('');
+}
+
+function keytermsHTML(){
+  const chips=S.params.vocab.map((t,i)=>`<span style="display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:6px;background:var(--muted);border:1px solid var(--border);font-size:12.5px">${esc(t)}<span data-act="removeTerm" data-arg="${i}" style="color:var(--mut-fg);cursor:pointer">✕</span></span>`).join('');
+  return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);min-height:42px">
+    ${chips}
+    <input data-input="keyterm" data-enter="addTerm" value="${esc(S.keyterm)}" placeholder="输入后回车添加…" style="flex:1;min-width:120px;border:none;outline:none;background:transparent;color:var(--fg);font-size:13px"/>
+  </div>`;
+}
+
+function toggleRow(label,code,desc,key,span){
+  return `<div style="${span?'grid-column:1 / -1;':''}display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border:1px solid var(--border);border-radius:6px">
+    <div><div style="display:flex;align-items:center;gap:8px"><span style="font-size:13.5px;font-weight:500">${label}</span><span style="font-size:10.5px;color:var(--mut-fg)" class="mono">${code}</span></div><div style="margin-top:2px;font-size:12px;color:var(--mut-fg)">${desc}</div></div>
+    ${toggle(S.params[key],'tg:'+key)}
+  </div>`;
+}
+
+function allocHTML(){
+  const p=S.plan;
+  if(!p) return '<div style="font-size:13px;color:var(--mut-fg);padding:6px">上传文件后自动计算分配…</div>';
+  if(p.error) return `<div style="font-size:13px;color:var(--red);padding:11px 15px;border:1px solid var(--border);border-radius:6px;background:var(--muted2)">${esc(p.error)}</div>`;
+  return (p.alloc||[]).map(a=>{
+    const usePct=Math.round((a.useSum/Math.max(1,S.data.freshThreshold))*100)+'%';
+    return `<div style="display:flex;align-items:center;gap:15px;padding:15px 17px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
+      <div style="flex:none;width:36px;height:36px;border-radius:6px;background:var(--muted);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:var(--mut-fg)">${esc((a.email||'?')[0].toUpperCase())}</div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <span style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" class="mono">${esc(a.email)}</span>
+          <span style="flex:none;font-size:11px;color:var(--mut-fg);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">${a.count} 个文件</span>
+          ${a.isNew?'<span style="flex:none;font-size:11px;color:var(--amber)">需注册</span>':''}
+        </div>
+        <div style="margin-top:5px;font-size:12px;color:var(--mut-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.files.join(' · '))}</div>
+        <div style="margin-top:9px;height:6px;border-radius:999px;background:var(--track);overflow:hidden"><div style="height:100%;width:${usePct};background:var(--accent);border-radius:999px"></div></div>
+      </div>
+      <div style="flex:none;text-align:right;min-width:140px">
+        <div style="font-size:13px;font-weight:600" class="mono">−${fmt(a.useSum)}</div>
+        <div style="margin-top:4px;font-size:11.5px;color:var(--mut-fg)" class="mono">${fmt(a.remBefore)} → ${fmt(a.remAfter)}</div>
+        <div style="margin-top:2px;font-size:11px;color:var(--mut-fg)">剩余额度</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function transcribeView(){
+  const p=S.plan||{};
+  const totalNeed=p.totalNeed||0, totalCredits=p.totalCredits||0, allocCount=(p.alloc||[]).length;
+  const totalSize=S.files.reduce((s,f)=>s+f.size,0);
+  const pool=S.data?S.data.pool:{fresh:0,total:0,usable:0};
+  const langLabel=S.params.language==='auto'?'AUTO':S.params.language.toUpperCase();
+
+  const fileSection = S.files.length ? `
+    <div style="display:flex;flex-direction:column;gap:11px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:13px;font-weight:500">已选择 ${S.files.length} 个文件 · 共 ${humanSize(totalSize)}</span>
+        <span data-act="clearFiles" style="font-size:12px;color:var(--mut-fg);cursor:pointer">清空</span>
+      </div>
+      ${S.files.map((f,i)=>fileRowHTML(f,i)).join('')}
+    </div>` : '';
+
+  const acctSection = S.files.length ? `
+    <div style="height:1px;background:var(--border)"></div>
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div><h2 style="margin:0;font-size:16px;font-weight:600">转录参数</h2><p style="margin:6px 0 0;font-size:13px;color:var(--mut-fg)">设置识别语言、导出格式与识别选项</p></div>
+        <div style="display:flex;gap:3px;padding:3px;background:var(--muted);border-radius:6px;width:248px">
+          <div data-act="setBatch" style="${seg(S.mode==='batch')}">批量统一</div>
+          <div data-act="setPerfile" style="${seg(S.mode==='perfile')}">逐个设置</div>
+        </div>
+      </div>
+      ${S.mode==='perfile'?'<div style="font-size:12px;color:var(--amber);padding:2px">逐个设置暂未启用,当前参数应用到全部文件。</div>':''}
+      <div style="border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff);overflow:hidden">
+        <div style="padding:13px 22px;border-bottom:1px solid var(--border);background:var(--muted2);font-size:12.5px;color:var(--mut-fg)">统一参数 · 应用到全部 <b style="color:var(--fg)">${S.files.length}</b> 个文件</div>
+        <div style="padding:22px;display:flex;flex-direction:column;gap:22px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:22px">
+            <div style="position:relative;display:flex;flex-direction:column;gap:8px">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500">识别语言<span class="mono" style="font-size:10.5px;color:var(--mut-fg);font-weight:400">language_code</span></label>
+              <button data-act="toggleLang" style="display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;cursor:pointer">
+                <span style="display:flex;align-items:center;gap:8px"><span class="mono" style="font-size:11px;color:var(--mut-fg)">${langLabel}</span>${esc(S.params.languageName)}</span><span style="color:var(--mut-fg)">▾</span>
+              </button>
+              ${langDropdownHTML()}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500">导出格式<span class="mono" style="font-size:10.5px;color:var(--mut-fg);font-weight:400">export_format</span></label>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">${formatChipsHTML()}</div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500">自定义词汇<span class="mono" style="font-size:10.5px;color:var(--mut-fg);font-weight:400">keyterms</span><span style="color:var(--mut-fg);font-weight:400;font-size:12.5px">· 提升专有名词识别准确度</span></label>
+            ${keytermsHTML()}
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            ${toggleRow('音频事件标记','tag_audio_events','标记 [笑声] [掌声] 等非语音事件','tag_audio_events')}
+            ${toggleRow('包含字幕','include_subtitles','生成带时间轴的字幕分段','include_subtitles')}
+            ${toggleRow('非逐字模式','no_verbatim','顺滑口语,去除重复与口头语','no_verbatim')}
+            ${toggleRow('使用说话人库','use_speaker_library','匹配已保存的说话人声纹,标注说话人','use_speaker_library')}
+            ${toggleRow('显示预估费用','show_cost','转录前先返回额度消耗预估','show_cost',true)}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div><h2 style="margin:0;font-size:16px;font-weight:600">使用的账号</h2><p style="margin:6px 0 0;font-size:13px;color:var(--mut-fg)">按剩余额度自动分配,先排空快用完的账号</p></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+        <div style="padding:15px 17px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
+          <div style="font-size:12px;color:var(--mut-fg)">预计总消耗</div>
+          <div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${fmt(totalNeed)}</div>
+          <div style="margin-top:2px;font-size:11.5px;color:var(--mut-fg)">含 ${S.data?S.data.margin:1.2}× 余量 · 实际 ${fmt(totalCredits)}</div>
+        </div>
+        <div style="padding:15px 17px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
+          <div style="font-size:12px;color:var(--mut-fg)">覆盖账号</div>
+          <div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${allocCount}</div>
+          <div style="margin-top:2px;font-size:11.5px;color:var(--mut-fg)">${S.files.length} 个文件已分配</div>
+        </div>
+        <div style="padding:15px 17px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
+          <div style="font-size:12px;color:var(--mut-fg)">账号池状态</div>
+          <div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${pool.fresh} / ${pool.total}</div>
+          <div style="margin-top:2px;font-size:11.5px;color:var(--mut-fg)">满额 · 另 ${pool.usable} 个部分可用</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">${allocHTML()}</div>
+    </div>` : '';
+
+  return `<main style="max-width:1024px;margin:0 auto;padding:34px 24px 132px;display:flex;flex-direction:column;gap:26px">
+    <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">上传音频,生成字幕</h1>
+      <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">支持单个或批量上传 · 按额度自动分配账号 · 完成后自动下载字幕文件</p></div>
+    <label style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
+      <input type="file" multiple accept="audio/*" data-input="pickFiles" style="display:none"/>
+      <div style="width:46px;height:46px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;border:1px solid var(--border);color:var(--fg)"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></div>
+      <div><div style="font-size:15px;font-weight:600">拖拽音频文件到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
+        <div style="margin-top:6px;font-size:12.5px;color:var(--mut-fg)">支持多选 · MP3 / WAV / M4A / FLAC / OGG · 单文件最大 1000 MB</div></div>
+    </label>
+    ${fileSection}
+    ${acctSection}
+  </main>
+  ${S.files.length?actionBarHTML(totalNeed,allocCount):''}`;
+}
+
+function actionBarHTML(totalNeed,allocCount){
+  let inner;
+  if(S.status==='running'){
+    inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg)"><span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>转录中 · 上传并轮询任务状态…</div>
+      <button style="padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:default">处理中…</button>`;
+  } else if(S.status==='done'){
+    const ok=S.results.filter(r=>r.ok).length;
+    inner=`<div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--fg)"><span style="width:20px;height:20px;border-radius:50%;background:var(--green);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px">✓</span>转录完成 · 已自动下载 ${ok} 个字幕文件</div>
+      <div style="display:flex;align-items:center;gap:9px">
+        <button data-act="reset" style="padding:10px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;font-weight:500;cursor:pointer">重新开始</button>
+        <button data-act="downloadAll" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer">全部下载</button>
+      </div>`;
+  } else {
+    inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut-fg)"><span>预计消耗</span><b style="color:var(--fg)" class="mono">${fmt(totalNeed)}</b><span>credits</span><span style="opacity:.5">·</span><span>覆盖 ${allocCount} 个账号</span></div>
+      <button data-act="start" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>开始转录</button>`;
+  }
+  return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg);border-top:1px solid var(--border)"><div style="max-width:1024px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px">${inner}</div></div>`;
+}
+
+// ----------------------------------------------------------- accounts view
+function accountsView(){
+  const accts=(S.data?S.data.accounts:[]);
+  const q=S.query.trim().toLowerCase();
+  let list=accts.filter(a=>!q||(a.email||'').toLowerCase().includes(q));
+  const dir=S.sortDir==='asc'?1:-1, key=S.sortKey;
+  list=[...list].sort((a,b)=>{
+    if(key==='email') return (a.email<b.email?-1:a.email>b.email?1:0)*dir;
+    let av,bv;
+    if(key==='rem'){av=a.rem||0;bv=b.rem||0;} else if(key==='used'){av=a.used||0;bv=b.used||0;} else {av=a.created||0;bv=b.created||0;}
+    return (av-bv)*dir;
+  });
+  const totalRem=accts.reduce((s,a)=>s+(a.rem||0),0);
+  const fresh=accts.filter(a=>a.status==='fresh').length;
+  const allSel=list.length>0 && list.every(a=>S.selected.includes(a.email));
+  const sortLabels={created:'创建时间',rem:'剩余额度',email:'邮箱名称',used:'使用量'};
+
+  const rows=list.map(a=>{
+    const sel=S.selected.includes(a.email), rev=S.revealed.includes(a.email);
+    const pct=a.rem!=null&&a.limit?Math.round((a.rem/a.limit)*100):0;
+    const statusText={fresh:'满额',partial:'部分可用',depleted:'已用尽',invalid:'失效',unknown:'未知'}[a.status]||a.status;
+    const statusColor={fresh:'var(--green)',partial:'var(--amber)',depleted:'var(--red)',invalid:'var(--red)',unknown:'var(--mut-fg)'}[a.status]||'var(--mut-fg)';
+    const barColor=a.rem===0?'var(--red)':pct<30?'var(--amber)':'var(--accent)';
+    const pw=a.password?(rev?a.password:'••••••••••'):'—';
+    return `<div style="display:flex;align-items:center;gap:15px;padding:15px 17px;border-radius:6px;background:var(--panel,#fff);${sel?'border:1px solid var(--fg)':'border:1px solid var(--border)'}">
+      <div data-act="toggleSel" data-arg="${esc(a.email)}" style="${cbBox(sel)}">${CHECK}</div>
+      <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;color:var(--mut-fg)">${esc((a.email||'?')[0].toUpperCase())}</div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <span style="font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" class="mono">${esc(a.email)}</span>
+          <span style="flex:none;font-size:11px;border-radius:5px;padding:2px 8px;border:1px solid var(--border);color:${statusColor}">${statusText}</span>
+        </div>
+        <div style="margin-top:6px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--mut-fg)">
+          <div style="display:flex;align-items:center;gap:7px"><span>密码</span><span class="mono" style="color:var(--fg);min-width:96px">${esc(pw)}</span>
+            ${a.password?`<span data-act="toggleRev" data-arg="${esc(a.email)}" style="cursor:pointer">${rev?'🙈':'👁'}</span>`:''}
+            <span data-act="copyEmail" data-arg="${esc(a.email)}" style="cursor:pointer" title="复制邮箱"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></span></div>
+          <span style="opacity:.5">·</span>
+          <div style="display:flex;align-items:center;gap:6px" class="mono"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg>${esc(a.createdStr)}</div>
+        </div>
+      </div>
+      <div style="flex:none;width:170px;text-align:right">
+        <div style="font-size:14px;font-weight:600" class="mono">${a.rem!=null?fmt(a.rem):'—'}</div>
+        <div style="margin-top:2px;font-size:11px;color:var(--mut-fg)">剩余 / ${fmt(a.limit)}</div>
+        <div style="margin-top:8px;height:6px;border-radius:999px;background:var(--track);overflow:hidden"><div style="height:100%;width:${pct}%;background:${barColor};border-radius:999px"></div></div>
+      </div>
+      <button data-act="delOne" data-arg="${esc(a.email)}" style="flex:none;width:32px;height:32px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--mut-fg);cursor:pointer;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+    </div>`;
+  }).join('');
+
+  const bulkBar = S.selected.length ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:12px 16px;border:1px solid var(--fg);border-radius:6px;background:var(--muted2);animation:pop .14s ease">
+      <div style="font-size:13px;font-weight:500">已选择 <b class="mono">${S.selected.length}</b> 个账号</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button data-act="refreshSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12.5px;font-weight:500;cursor:pointer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>刷新额度</button>
+        <button data-act="exportSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12.5px;font-weight:500;cursor:pointer">导出 (.json)</button>
+        <button data-act="delSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--red);background:var(--panel,#fff);color:var(--red);font-size:12.5px;font-weight:500;cursor:pointer">删除</button>
+        <button data-act="clearSel" style="padding:7px 12px;border-radius:6px;border:none;background:transparent;color:var(--mut-fg);font-size:12.5px;cursor:pointer">取消</button>
+      </div></div>` : '';
+
+  return `<main style="max-width:1024px;margin:0 auto;padding:34px 24px 60px;display:flex;flex-direction:column;gap:22px">
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
+      <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">账号管理</h1>
+        <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">本地保存的 ElevenLabs 账号 · 邮箱、密码与剩余额度 · 数据存于 accounts.json</p></div>
+      <div style="display:flex;align-items:center;gap:9px">
+        <button data-act="openLogin" style="display:flex;align-items:center;gap:7px;padding:9px 15px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>登录账号</button>
+        <button data-act="openReg" style="display:flex;align-items:center;gap:7px;padding:9px 16px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>启动注册机</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+      ${statCard('本地账号',accts.length)}${statCard('总剩余额度',fmt(totalRem))}${statCard('满额账号',fresh)}${statCard('已选择',S.selected.length)}
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px;display:flex;align-items:center;gap:9px;padding:0 12px;height:40px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--mut-fg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input data-input="query" value="${esc(S.query)}" placeholder="搜索邮箱…" style="flex:1;border:none;outline:none;background:transparent;color:var(--fg);font-size:13.5px"/>
+      </div>
+      <div style="position:relative">
+        <button data-act="toggleSort" style="display:flex;align-items:center;gap:8px;height:40px;padding:0 13px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4"/><path d="M7 20V4"/><path d="m21 8-4-4-4 4"/><path d="M17 4v16"/></svg><span style="color:var(--mut-fg);font-size:12px">排序</span>${sortLabels[S.sortKey]}<span style="color:var(--mut-fg)">▾</span></button>
+        ${S.sortOpen?`<div style="position:absolute;top:46px;right:0;z-index:20;width:180px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.14);padding:6px;animation:fadein .12s ease">${['created','rem','email','used'].map(k=>`<div data-act="pickSort" data-arg="${k}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;font-size:13px;cursor:pointer;${S.sortKey===k?'background:var(--muted)':''}"><span>${sortLabels[k]}</span><span style="color:var(--green)">${S.sortKey===k?'✓':''}</span></div>`).join('')}</div>`:''}
+      </div>
+      <button data-act="toggleDir" style="display:flex;align-items:center;gap:7px;height:40px;padding:0 13px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;cursor:pointer">${S.sortDir==='asc'?'↑':'↓'}<span style="color:var(--mut-fg)">${S.sortDir==='asc'?'升序':'降序'}</span></button>
+    </div>
+    <div style="display:flex;align-items:center;gap:13px;padding:0 4px">
+      <div data-act="toggleAll" style="${cbBox(allSel)}">${CHECK}</div>
+      <span style="font-size:12.5px;color:var(--mut-fg)">全选 · 共 ${accts.length} 个账号</span>
+    </div>
+    ${bulkBar}
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${rows || `<div style="text-align:center;padding:48px 24px;border:1.5px dashed var(--border);border-radius:6px;color:var(--mut-fg)"><div style="font-size:14px;font-weight:500;color:var(--fg)">暂无账号</div><div style="margin-top:6px;font-size:12.5px">用 CLI \`python stt.py login\` 保存账号,或 \`pool warm\` 批量创建。</div></div>`}
+    </div>
+  </main>`;
+}
+function statCard(label,val){return `<div style="padding:14px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)"><div style="font-size:12px;color:var(--mut-fg)">${label}</div><div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${val}</div></div>`;}
+
+// ------------------------------------------------------------------ modals
+function modalsHTML(){
+  let h='';
+  if(S.loginOpen) h+=`<div data-act="closeLogin" style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:440px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between"><div style="font-size:15px;font-weight:600">登录账号</div><div data-act="closeLogin" style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut-fg)">✕</div></div>
+      <div style="padding:22px;font-size:13px;color:var(--mut-fg);line-height:1.6">浏览器登录需要 Playwright,请在命令行运行:<br><br><span class="mono" style="color:var(--fg)">python stt.py login</span><br><br>登录完成后回到本页,账号会自动出现在列表中。</div>
+      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)"><button data-act="closeLogin" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">知道了</button><button data-act="reloadState" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">刷新列表</button></div>
+    </div></div>`;
+  if(S.regOpen) h+=`<div data-act="closeReg" style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:520px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:9px"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg><span style="font-size:15px;font-weight:600">启动注册机</span></div><div data-act="closeReg" style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut-fg)">✕</div></div>
+      <div style="padding:22px;font-size:13px;color:var(--mut-fg);line-height:1.6">注册机需要临时邮箱后端与真实 Chrome 自动化,请在命令行运行:<br><br><span class="mono" style="color:var(--fg)">python stt.py pool warm --target 3</span><br><br>参数在 <span class="mono" style="color:var(--fg)">config.toml → [temp_email]</span> 配置。完成后点「刷新列表」。</div>
+      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)"><button data-act="closeReg" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">知道了</button><button data-act="reloadState" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">刷新列表</button></div>
+    </div></div>`;
+  return h;
+}
+
+// ------------------------------------------------------------------ render
+function render(){
+  const app=document.getElementById('app');
+  app.innerHTML = headerHTML() + (S.view==='transcribe'?transcribeView():accountsView()) + modalsHTML();
+}
+
+// ------------------------------------------------------------- interactions
+async function refreshPlan(){
+  const ready=S.files.filter(f=>!f.uploading);
+  if(!ready.length){ S.plan=null; return; }
+  S.plan=await api('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({files:ready.map(f=>({name:f.name,duration:f.duration}))})});
+  render();
+}
+
+async function addFiles(fileList){
+  for(const file of fileList){
+    if(file.size>1000*1024*1024){ toast(`${file.name} 超过 1000 MB,已跳过`); continue; }
+    const ext=(file.name.split('.').pop()||'').toUpperCase().slice(0,4);
+    const entry={id:null,name:file.name,size:file.size,duration:null,credits:null,ext,uploading:true};
+    S.files.push(entry); render();
+    const dur=await measureDuration(file);
+    entry.duration=dur;
+    const qs=new URLSearchParams({name:file.name}); if(dur)qs.set('duration',dur);
+    try{
+      const res=await api('/api/upload?'+qs,{method:'POST',body:file});
+      entry.id=res.id; entry.duration=res.duration!=null?res.duration:dur; entry.credits=res.credits; entry.uploading=false;
+    }catch(e){ entry.uploading=false; entry.credits=null; toast(file.name+' 上传失败'); }
+    render();
+  }
+  refreshPlan();
+}
+
+async function startTranscribe(){
+  const uploads=S.files.filter(f=>f.id&&!f.uploading).map(f=>f.id);
+  if(!uploads.length){ toast('没有已就绪的文件'); return; }
+  S.status='running'; render();
+  const res=await api('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({uploads,params:S.params})});
+  if(res.error){ S.status='idle'; render(); toast(res.error); return; }
+  // map results back onto file entries + auto-download
+  S.results=res.results||[];
+  S.results.forEach(r=>{
+    const f=S.files.find(x=>x.name===r.name);
+    if(f){ f.failed=!r.ok; f.download=r.download; f._content=r.content; }
+    if(r.ok&&r.content) downloadB64(r.download,r.content);
+    if(!r.ok) toast(`${r.name} 失败`);
+  });
+  if(res.state) S.data=res.state;
+  S.status='done'; render();
+}
+
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-act]'); if(!el) return;
+  const act=el.dataset.act, arg=el.dataset.arg;
+  const handlers={
+    toggleTheme(){S.theme=S.theme==='dark'?'light':'dark';applyTheme(S.theme);render();},
+    goTranscribe(){S.view='transcribe';S.sortOpen=false;render();},
+    goAccounts(){S.view='accounts';reloadState();},
+    // transcribe
+    clearFiles(){S.files=[];S.plan=null;S.status='idle';S.results=[];render();},
+    removeFile(){S.files.splice(+arg,1);render();refreshPlan();},
+    setBatch(){S.mode='batch';render();}, setPerfile(){S.mode='perfile';render();},
+    toggleLang(){S.langOpen=!S.langOpen;render();},
+    pickLang(){S.params.language=el.dataset.code;S.params.languageName=el.dataset.name;S.langOpen=false;render();refreshPlan();},
+    pickFormat(){S.params.format=arg;render();},
+    removeTerm(){S.params.vocab.splice(+arg,1);render();},
+    start(){startTranscribe();}, reset(){S.files=[];S.plan=null;S.status='idle';S.results=[];render();},
+    download(){const f=S.files[+arg];if(f&&f._content)downloadB64(f.download,f._content);},
+    downloadAll(){S.results.filter(r=>r.ok&&r.content).forEach(r=>downloadB64(r.download,r.content));},
+    // accounts
+    toggleSel(){S.selected=S.selected.includes(arg)?S.selected.filter(x=>x!==arg):[...S.selected,arg];render();},
+    toggleRev(){S.revealed=S.revealed.includes(arg)?S.revealed.filter(x=>x!==arg):[...S.revealed,arg];render();},
+    copyEmail(){try{navigator.clipboard.writeText(arg);toast('已复制邮箱');}catch(e){}},
+    toggleAll(){const list=visibleEmails();const all=list.every(x=>S.selected.includes(x));S.selected=all?[]:list;render();},
+    clearSel(){S.selected=[];render();},
+    toggleSort(){S.sortOpen=!S.sortOpen;render();},
+    pickSort(){S.sortKey=arg;S.sortOpen=false;render();},
+    toggleDir(){S.sortDir=S.sortDir==='asc'?'desc':'asc';render();},
+    delOne(){if(confirm('删除账号 '+arg+' ?'))deleteAccounts([arg]);},
+    delSel(){if(confirm('删除选中的 '+S.selected.length+' 个账号?'))deleteAccounts(S.selected.slice());},
+    refreshSel(){refreshCredits(S.selected.slice());},
+    exportSel(){exportAccounts(S.selected.slice());},
+    openLogin(){S.loginOpen=true;render();}, closeLogin(){S.loginOpen=false;render();},
+    openReg(){S.regOpen=true;render();}, closeReg(){S.regOpen=false;render();},
+    reloadState(){S.loginOpen=false;S.regOpen=false;reloadState();},
+    stop(){e.stopPropagation();},
+  };
+  if(act.startsWith('tg:')){const k=act.slice(3);S.params[k]=!S.params[k];render();return;}
+  if(handlers[act])handlers[act]();
+});
+
+document.addEventListener('input',e=>{
+  const el=e.target.closest('[data-input]'); if(!el) return;
+  const k=el.dataset.input;
+  if(k==='pickFiles'){addFiles(el.files);}
+  else if(k==='query'){S.query=el.value;S.selected=[];render();document.querySelector('[data-input="query"]').focus();}
+  else if(k==='langQuery'){S.langQuery=el.value;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="langQuery"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
+  else if(k==='keyterm'){S.keyterm=el.value;}
+});
+document.addEventListener('keydown',e=>{
+  const el=e.target.closest('[data-enter]'); if(!el||e.key!=='Enter')return;
+  if(el.dataset.enter==='addTerm'){const v=S.keyterm.trim();if(v&&!S.params.vocab.includes(v))S.params.vocab.push(v);S.keyterm='';render();}
+});
+
+function visibleEmails(){
+  const q=S.query.trim().toLowerCase();
+  return (S.data?S.data.accounts:[]).filter(a=>!q||(a.email||'').toLowerCase().includes(q)).map(a=>a.email);
+}
+async function reloadState(){S.data=await api('/api/state');render();}
+async function deleteAccounts(emails){S.data=await api('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({emails})});S.selected=S.selected.filter(x=>!emails.includes(x));render();toast('已删除');}
+async function refreshCredits(emails){toast('刷新中…');S.data=await api('/api/accounts/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({emails})});render();toast('额度已刷新');}
+function exportAccounts(emails){const accts=(S.data?S.data.accounts:[]).filter(a=>emails.includes(a.email));const blob=new Blob([JSON.stringify(accts,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='accounts-export.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+
+// -------------------------------------------------------------------- boot
+(async function(){
+  let dark=false; try{dark=matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;}catch(e){}
+  S.theme=dark?'dark':'light'; applyTheme(S.theme);
+  S.data=await api('/api/state');
+  if(S.data.defaults){Object.assign(S.params,{
+    tag_audio_events:S.data.defaults.tag_audio_events, include_subtitles:S.data.defaults.include_subtitles,
+    no_verbatim:S.data.defaults.no_verbatim, use_speaker_library:S.data.defaults.use_speaker_library,
+    format:S.data.defaults.export_format, show_cost:S.data.defaults.show_cost});}
+  render();
+})();
+</script>
+</body>
+</html>
