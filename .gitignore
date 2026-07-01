@@ -2,6 +2,7 @@
 .claude/
 .codex/
 .agents/
+.pi/
 
 # STT script runtime artifacts (creds / local config / temp)
 session.json
