@@ -67,13 +67,12 @@ account = {email, password, refreshToken, localId, jwt, jwt_exp, source:"auto",
            temp_address:addr, created_at, credits_known:{limit,count,fetched_at}}
 save to store; return account
 ```
-**CURRENT BLOCKER (step 4):** login submit re-triggers "send verify email" instead of
-signing in. The ElevenLabs beforeSignIn blocking function rejects with "email has not
-been verified" EVEN THOUGH Firebase `accounts:update` returned `emailVerified:true`.
-So the blocking fn reads ElevenLabs SERVER-SIDE state (Firestore doc / custom claim
-written by a Firebase Auth `onUpdate:emailVerified` trigger), NOT the Firebase
-emailVerified field directly. REST `signInWithPassword` is also blocked the same way.
-Next experiments for the next session (see design.md §Captcha Research).
+**RESOLVED (step 4):** REST `accounts:update` alone is insufficient and may consume the
+OOB code. The working path is: real Chrome signup → poll temp-mail → open the emailed
+`/app/action?mode=verifyEmail&oobCode=...` link in the same real Chrome → click the
+Email Verification modal **Continue** → sign in again with the same email/password.
+After that, REST `accounts:signInWithPassword` succeeds and `/v1/user/subscription`
+returns 10000 credits.
 
 Dependencies added (pip, kept): pyautogui, pygetwindow, pyperclip,
 playwright-stealth (2.0.3, not effective vs hCaptcha Enterprise but installed).
@@ -269,27 +268,24 @@ No network.
 5. CDP-attached Chrome (even with pyautogui driving) → hCaptcha on login submit.
    Signup does NOT auto-sign-in (post-signup localStorage firebase user = null).
 
-### Current blocker (step 4 of register_one)
-Login submit via pyautogui (no CDP) **re-triggers "send verify email"** instead of
-signing in — same blocking-fn rejection. The server-side verified state has not been
-flipped by REST `accounts:update` alone.
+### Resolved blocker (step 4 of register_one)
+Working path: skip REST `accounts:update`; navigate the emailed verification link in
+real Chrome. The page redirects to `/app/sign-in` and shows an "Email Verification"
+modal. Click **Continue**, then sign in again with the same email/password. This flips
+whatever ElevenLabs server-side verified state the blocking function needs; after this,
+REST `accounts:signInWithPassword` works and yields refreshToken/localId/idToken.
 
-### Next experiments to try (ordered, for next session)
-1. **Wait for server-side propagation.** `accounts:update` returns immediately but the
-   `onUpdate:emailVerified` trigger → Firestore/claim write may be async. Retry
-   `signInWithPassword` at +10s, +30s, +60s, +120s. If it eventually passes → no browser
-   login needed; REST sign-in after a wait. CHEAPEST FIX, TRY FIRST.
-2. **Let the frontend verify link run in the real Chrome.** After REST `accounts:update`,
-   pyautogui-navigate the SAME Chrome to the verify link (`/app/action?mode=verifyEmail&oobCode=...`)
-   and let the Next.js `handleVerifyEmail` handler execute (it may call an
-   ElevenLabs API we haven't found, or the trigger fires on the client visit). Then
-   pyautogui-login. This is what a real user does.
-3. **Login WITHOUT prior REST update** — maybe REST `accounts:update` flips Firebase
-   emailVerified but does NOT fire the ElevenLabs onUpdate trigger (trigger fires on
-   genuine client applyActionCode only). So skip REST update, navigate the verify link
-   in real Chrome instead, THEN login.
-4. If all REST/browser-login paths stay blocked: semi-auto fallback (user solves the
-   one hCaptcha on login) OR paid hCaptcha solver. User prefers A (full auto).
+Implementation note: Chrome password-manager popups can appear after successful sign-in;
+they do not block REST token capture.
+
+### Newly found blocker (pool warm repeat runs)
+`register_one()` currently reuses the existing Chrome profile/window. If the previous
+run left Chrome logged in to the newly created ElevenLabs account, navigating to
+`/app/sign-up` redirects to `/app/onboarding`, so the next pool-warm attempt cannot
+start signup. Minimal fix next session: before each registration, use a fresh Chrome
+profile/session (or sign out/clear ElevenLabs site data) so signup always starts from
+an anonymous browser state. Prefer a temporary `--user-data-dir` per registration;
+that is less fragile than clicking sign-out UI.
 
 ### Credentials (Q5, for next session — DO NOT COMMIT)
 - temp-email base_url: `https://apimail.misuzu.mom`, admin_password: `<ADMIN_PASSWORD>` (redacted; in local config.toml),

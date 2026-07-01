@@ -8,9 +8,12 @@ contract and README.md for usage.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import pathlib
+import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -25,6 +28,7 @@ FIREBASE_API_KEY = "AIzaSyBSsRE_1Os04-bxpd5JTLIniy3UK4OqKys"
 FIREBASE_USER_KEY = f"firebase:authUser:{FIREBASE_API_KEY}:[DEFAULT]"
 API_BASE = "https://api.us.elevenlabs.io"
 SECURETOKEN_URL = f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}"
+IDENTITY_URL = f"https://identitytoolkit.googleapis.com/v1/accounts"
 FIREBASE_REFERER = "https://elevenlabs.io/"  # API key is referer-restricted; required on googleapis calls
 LOGIN_URL = "https://elevenlabs.io/app/speech-to-text"
 
@@ -289,6 +293,51 @@ def authed_client(session: dict[str, Any], save=None) -> httpx.Client:
     )
 
 
+def random_password() -> str:
+    """ElevenLabs/Firebase-compatible disposable password."""
+    alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "El1!" + "".join(secrets.choice(alphabet) for _ in range(12))
+
+
+def firebase_verify_oob_code(oob_code: str) -> dict[str, Any]:
+    r = httpx.post(
+        f"{IDENTITY_URL}:update?key={FIREBASE_API_KEY}",
+        json={"oobCode": oob_code},
+        headers={"Referer": FIREBASE_REFERER},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise SystemExit(f"firebase verify failed ({r.status_code}): {r.text[:300]}")
+    return r.json()
+
+
+def firebase_signin_password(email: str, password: str) -> dict[str, Any]:
+    r = httpx.post(
+        f"{IDENTITY_URL}:signInWithPassword?key={FIREBASE_API_KEY}",
+        json={"email": email, "password": password, "returnSecureToken": True},
+        headers={"Referer": FIREBASE_REFERER},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise SystemExit(f"firebase password sign-in failed ({r.status_code}): {r.text[:300]}")
+    return r.json()
+
+
+def account_from_password_signin(email: str, password: str, temp_address: str | None = None) -> dict[str, Any]:
+    data = firebase_signin_password(email, password)
+    sess = {
+        "apiKey": FIREBASE_API_KEY,
+        "refreshToken": data.get("refreshToken"),
+        "localId": data.get("localId"),
+        "email": data.get("email"),
+        "jwt": data.get("idToken"),
+        "jwt_exp": time.time() + int(data.get("expiresIn", 3600)) - 60,
+        "temp_address": temp_address or email,
+        "created_at": time.time(),
+    }
+    return _session_to_account(sess, source="auto")
+
+
 # ----------------------------------------------------------------- audio
 
 def audio_duration(path: pathlib.Path) -> float | None:
@@ -372,6 +421,98 @@ def export_task(client: httpx.Client, task_id: str, fmt: str, lang_code: str | N
     return r.content
 
 
+# --- temp-email --------------------------------------------------------
+
+OOB_RE = re.compile(r"[?&]oobCode=([A-Za-z0-9_-]+)")
+
+
+def extract_oob_code(*parts: str | None) -> str | None:
+    """Extract Firebase oobCode from mail subject/text/html."""
+    for part in parts:
+        if not part:
+            continue
+        match = OOB_RE.search(html.unescape(part))
+        if match:
+            return match.group(1)
+    return None
+
+
+def temp_email_create(name: str | None = None,
+                      cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Create a cloudflare_temp_email address; admin path first, user path fallback."""
+    cfg = cfg or temp_email_config()
+    if not cfg["base_url"] or not cfg["domain"]:
+        raise SystemExit("temp_email.base_url and temp_email.domain are required")
+    base = str(cfg["base_url"]).rstrip("/")
+    # cloudflare_temp_email v1.9 requires name even on the admin API.
+    local = name or ("el" + secrets.token_hex(5))
+    body = {"name": local, "domain": cfg["domain"], "cf_token": "",
+            "enableRandomSubdomain": False}
+
+    with httpx.Client(timeout=30) as client:
+        if cfg.get("use_admin_path", True) and cfg.get("admin_password"):
+            r = client.post(f"{base}/admin/new_address", json=body,
+                            headers={"x-admin-auth": cfg["admin_password"]})
+            if r.status_code < 400:
+                return r.json()
+            if r.status_code not in (401, 403):
+                raise SystemExit(f"temp-email create failed ({r.status_code}): {r.text[:300]}")
+
+        headers = {}
+        if cfg.get("site_password"):
+            headers["x-custom-auth"] = cfg["site_password"]
+        r = client.post(f"{base}/api/new_address", json=body, headers=headers)
+        if r.status_code >= 400:
+            raise SystemExit(f"temp-email create failed ({r.status_code}): {r.text[:300]}")
+        return r.json()
+
+
+def latest_verify_link(addr_jwt: str, cfg: dict[str, Any] | None = None) -> str:
+    """Return newest ElevenLabs verification link from a temp mailbox."""
+    cfg = cfg or temp_email_config()
+    base = str(cfg["base_url"]).rstrip("/")
+    deadline = time.time() + float(cfg["poll_timeout_secs"])
+    headers = {"Authorization": f"Bearer {addr_jwt}"}
+    with httpx.Client(timeout=30) as client:
+        while time.time() < deadline:
+            r = client.get(f"{base}/api/parsed_mails", params={"limit": 20, "offset": 0},
+                           headers=headers)
+            if r.status_code >= 400:
+                raise SystemExit(f"temp-email poll failed ({r.status_code}): {r.text[:300]}")
+            for mail in r.json().get("results", []):
+                text = html.unescape("\n".join(str(mail.get(k) or "") for k in ("text", "html")))
+                match = re.search(r"https://elevenlabs\.io/app/action\?[^\s\"<>]+oobCode=[^\s\"<>]+", text)
+                if match:
+                    return match.group(0)
+            time.sleep(float(cfg["poll_interval_secs"]))
+    raise SystemExit("timed out waiting for ElevenLabs verification email")
+
+
+def poll_parsed_mails(addr_jwt: str, cfg: dict[str, Any] | None = None) -> str:
+    """Poll parsed mails until the first Firebase oobCode appears."""
+    cfg = cfg or temp_email_config()
+    base = str(cfg["base_url"]).rstrip("/")
+    deadline = time.time() + float(cfg["poll_timeout_secs"])
+    seen: set[str] = set()
+    headers = {"Authorization": f"Bearer {addr_jwt}"}
+    with httpx.Client(timeout=30) as client:
+        while time.time() < deadline:
+            r = client.get(f"{base}/api/parsed_mails", params={"limit": 20, "offset": 0},
+                           headers=headers)
+            if r.status_code >= 400:
+                raise SystemExit(f"temp-email poll failed ({r.status_code}): {r.text[:300]}")
+            for mail in r.json().get("results", []):
+                mid = str(mail.get("id") or "")
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                code = extract_oob_code(mail.get("subject"), mail.get("text"), mail.get("html"))
+                if code:
+                    return code
+            time.sleep(float(cfg["poll_interval_secs"]))
+    raise SystemExit("timed out waiting for ElevenLabs verification email")
+
+
 # --- credits / selection ----------------------------------------------
 
 def estimate_required(duration: float | None) -> int | None:
@@ -428,6 +569,58 @@ def account_remaining(account: dict[str, Any], store: dict[str, Any], force: boo
             account["invalid_reason"] = str(e)[:120]
         save_accounts(store)  # persist auth-fail / quarantine state
         return None
+
+
+def register_one() -> dict[str, Any]:
+    """Create one ElevenLabs account via temp-mail + real Chrome, then return account."""
+    try:
+        import pyautogui, pyperclip, pygetwindow as gw
+    except ImportError:
+        raise SystemExit("auto-register needs pyautogui pyperclip pygetwindow")
+
+    addr = temp_email_create()
+    email = addr["address"]
+    password = random_password()
+    chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+    # ponytail: coordinates are ugly, but selector automation triggers hCaptcha; real Chrome doesn't.
+    wins = [w for w in gw.getAllWindows() if "Google Chrome" in w.title]
+    if wins:
+        wins[0].restore(); wins[0].activate(); wins[0].maximize()
+    else:
+        subprocess.Popen([chrome, "--new-window", "https://elevenlabs.io/app/sign-up"])
+    time.sleep(1)
+    pyautogui.hotkey("ctrl", "l")
+    pyperclip.copy("https://elevenlabs.io/app/sign-up")
+    pyautogui.hotkey("ctrl", "v")
+    pyautogui.press("enter")
+    time.sleep(5)
+    pyautogui.click(1080, 522); pyautogui.hotkey("ctrl", "a")
+    pyperclip.copy(email); pyautogui.hotkey("ctrl", "v")
+    pyautogui.click(1080, 608); pyautogui.hotkey("ctrl", "a")
+    pyperclip.copy(password); pyautogui.hotkey("ctrl", "v")
+    pyautogui.click(1080, 750)
+
+    link = latest_verify_link(addr["jwt"])
+    pyautogui.hotkey("ctrl", "l")
+    pyperclip.copy(link)
+    pyautogui.hotkey("ctrl", "v")
+    pyautogui.press("enter")
+    time.sleep(3)
+    pyautogui.click(1242, 618)  # verification modal Continue
+    time.sleep(1)
+    pyautogui.click(1080, 610); pyautogui.hotkey("ctrl", "a")
+    pyperclip.copy(email); pyautogui.hotkey("ctrl", "v")
+    pyautogui.click(1080, 696); pyautogui.hotkey("ctrl", "a")
+    pyperclip.copy(password); pyautogui.hotkey("ctrl", "v")
+    pyautogui.click(1080, 759)
+    time.sleep(8)
+
+    account = account_from_password_signin(email, password, temp_address=email)
+    with authed_client(account, save=lambda _s: None) as client:
+        client.get("/v1/user")
+        refresh_credits(account, client)
+    return account
 
 
 def select_account(accounts: list[dict[str, Any]], required: int | None,
@@ -551,14 +744,16 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         print("  candidates: " + ", ".join(f"{em}(rem={r})" for em, r in info), file=sys.stderr)
     if chosen is None:
         if has_temp_email_config(pathlib.Path(args.config)):
-            # ponytail: on-demand auto-register lands in Step 5; placeholder until then.
-            raise SystemExit(
-                f"no account has enough credits (required~{required}) — auto-register not yet wired")
-        chosen = active_account(store)
-        if chosen is None:
-            raise SystemExit("no accounts — run `stt login` or configure temp-email + `stt pool warm`")
-        print(f"warn: no account confirmed sufficient (required~{required}); "
-              f"using {chosen.get('email')} best-effort", file=sys.stderr)
+            print(f"no sufficient account (required~{required}); registering one...", file=sys.stderr)
+            chosen = register_one()
+            upsert_account(store, chosen)
+            save_accounts(store)
+        else:
+            chosen = active_account(store)
+            if chosen is None:
+                raise SystemExit("no accounts — run `stt login` or configure temp-email + `stt pool warm`")
+            print(f"warn: no account confirmed sufficient (required~{required}); "
+                  f"using {chosen.get('email')} best-effort", file=sys.stderr)
     else:
         print(f"selected {chosen.get('email')} (remaining={cached_remaining(chosen)}, "
               f"required~{required})", file=sys.stderr)
@@ -632,6 +827,10 @@ def _selfcheck() -> int:
     ]
     fstore = {"accounts": fake, "active": "a"}
     assert cached_remaining(fake[0]) == 1000 and cached_remaining(fake[1]) == 10000
+    sample_link = "https://elevenlabs.io/app/action?mode=verifyEmail&amp;oobCode=ABC_def-123&apiKey=x"
+    assert extract_oob_code(sample_link) == "ABC_def-123"
+    pw = random_password()
+    assert len(pw) >= 8 and any(c.isdigit() for c in pw) and any(not c.isalnum() for c in pw)
     chosen, info = select_account(fake, required=800, margin=1.2, store=fstore)
     # needed = 800*1.2+1 = 961; a(1000) & b(10000) sufficient; best-fit picks smallest => a
     assert chosen["email"] == "a", f"best-fit should pick a, got {chosen and chosen['email']}"
@@ -680,7 +879,22 @@ def cmd_accounts(args: argparse.Namespace) -> int:
 def cmd_pool(args: argparse.Namespace) -> int:
     if args.pool_cmd == "status":
         return cmd_pool_status(args)
+    if args.pool_cmd == "warm":
+        return cmd_pool_warm(args)
     return 1
+
+
+def cmd_pool_warm(args: argparse.Namespace) -> int:
+    store = load_accounts()
+    target = args.target or accounts_config(pathlib.Path(args.config))["pool_target"]
+    while True:
+        fresh = sum(1 for a in store["accounts"] if not a.get("invalid") and (cached_remaining(a) or 0) >= accounts_config(pathlib.Path(args.config))["fresh_threshold"])
+        if fresh >= target:
+            print(f"pool warm: {fresh}/{target}")
+            return 0
+        account = register_one()
+        upsert_account(store, account)
+        save_accounts(store)
 
 
 def cmd_pool_status(args: argparse.Namespace) -> int:
@@ -752,6 +966,9 @@ def build_parser() -> argparse.ArgumentParser:
     psub = pool.add_subparsers(dest="pool_cmd", required=True)
     ps = psub.add_parser("status", help="show fresh/usable/depleted/invalid counts")
     ps.add_argument("-c", "--config", default=str(CONFIG_PATH), help="config.toml path")
+    pw = psub.add_parser("warm", help="register accounts until the pool target is met")
+    pw.add_argument("-c", "--config", default=str(CONFIG_PATH), help="config.toml path")
+    pw.add_argument("--target", type=int, help="fresh account target")
     return p
 
 

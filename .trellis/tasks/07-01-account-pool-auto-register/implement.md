@@ -1,13 +1,13 @@
 # Implement — Multi-account quota pool & auto-registration
 
-> **STATUS (2026-07-01):** Steps 1, 2, 7 DONE & committed (offline, `stt selfcheck` green,
-> real account migrated, `stt accounts`/`pool status` work). Step 3 (temp-email) de-risked.
-> Steps 4–6 BLOCKED on captcha/login-verification gate — see design.md §Captcha Research.
-> The signup flow is Email+Password+hCaptcha (NOT email-link); pyautogui+real-Chrome passes
-> hCaptcha silently, but the post-signup login is rejected by ElevenLabs's beforeSignIn blocking
-> fn (reads server-side verified state, not Firebase emailVerified). Next session: try the
-> ordered experiments in design.md §Captcha Research → "Next experiments to try" (wait-for-
-> propagation retry first). Q5 creds are in local config.toml (gitignored).
+> **STATUS (2026-07-01):** Steps 1, 2, 7 DONE & committed. Step 3 DONE in working tree.
+> Step 4 unblocked: real Chrome signup → open emailed `/app/action` verify link → click modal
+> Continue → sign in again → Firebase REST `signInWithPassword` succeeds and `/v1/user/subscription`
+> returns 10000 credits. Step 5 wired in working tree; `stt transcribe _tmp-sample.m4a --show-cost`
+> selected the auto account and completed. Step 6 `pool warm` is minimally wired; target=1 validated.
+> Full pool target warm repeat is BLOCKED: the reused Chrome profile remains logged in and redirects
+> `/app/sign-up` to `/app/onboarding`. Next fix: launch each registration with a fresh temporary
+> Chrome `--user-data-dir` (or otherwise clear/sign out). Q5 creds are in local config.toml (gitignored).
 
 Inline workflow (Pi): the main session edits `stt.py` directly. Each step ends
 with a runnable validation. Do not `task.py start` until the user reviews the
