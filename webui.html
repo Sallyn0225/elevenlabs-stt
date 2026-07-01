@@ -46,6 +46,8 @@ const S = {
   query:'', sortKey:'created', sortDir:'desc', sortOpen:false,
   selected:[], revealed:[],
   loginOpen:false, regOpen:false,
+  page:1, pageSize:5, login:null, reg:null, busy:null,   // pagination + login/register flow
+  _pageEmails:[], _page:1, _totalPages:1,        // filled by accountsView() for handlers
 };
 
 // --------------------------------------------------------------- utilities
@@ -296,10 +298,18 @@ function accountsView(){
   });
   const totalRem=accts.reduce((s,a)=>s+(a.rem||0),0);
   const fresh=accts.filter(a=>a.status==='fresh').length;
-  const allSel=list.length>0 && list.every(a=>S.selected.includes(a.email));
   const sortLabels={created:'创建时间',rem:'剩余额度',email:'邮箱名称',used:'使用量'};
 
-  const rows=list.map(a=>{
+  // pagination — slice the filtered+sorted list to the current page
+  const filteredCount=list.length;
+  const totalPages=Math.max(1,Math.ceil(filteredCount/S.pageSize));
+  const page=Math.min(Math.max(1,S.page),totalPages);
+  const startIdx=(page-1)*S.pageSize;
+  const pageList=list.slice(startIdx,startIdx+S.pageSize);
+  S._pageEmails=pageList.map(a=>a.email); S._page=page; S._totalPages=totalPages;
+  const allSel=pageList.length>0 && pageList.every(a=>S.selected.includes(a.email));
+
+  const rows=pageList.map(a=>{
     const sel=S.selected.includes(a.email), rev=S.revealed.includes(a.email);
     const pct=a.rem!=null&&a.limit?Math.round((a.rem/a.limit)*100):0;
     const statusText={fresh:'满额',partial:'部分可用',depleted:'已用尽',invalid:'失效',unknown:'未知'}[a.status]||a.status;
@@ -340,6 +350,16 @@ function accountsView(){
         <button data-act="clearSel" style="padding:7px 12px;border-radius:6px;border:none;background:transparent;color:var(--mut-fg);font-size:12.5px;cursor:pointer">取消</button>
       </div></div>` : '';
 
+  const pageSizeSel=[5,10,20,50].map(n=>`<div data-act="setPageSize" data-arg="${n}" style="padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer;${S.pageSize===n?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow)':'color:var(--mut-fg)'}">${n}</div>`).join('');
+  const rangeStart=filteredCount?startIdx+1:0, rangeEnd=Math.min(startIdx+S.pageSize,filteredCount);
+  const pgBtn=dis=>`padding:7px 13px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);font-size:12.5px;${dis?'color:var(--mut-fg);opacity:.5;cursor:default':'color:var(--fg);cursor:pointer'}`;
+  const pageChips=Array.from({length:totalPages},(_,i)=>i+1).map(n=>`<div data-act="gotoPage" data-arg="${n}" style="min-width:32px;height:32px;padding:0 8px;display:flex;align-items:center;justify-content:center;border-radius:6px;font-size:12.5px;cursor:pointer;${n===page?'background:var(--accent);color:var(--accent-fg)':'border:1px solid var(--border);color:var(--fg)'}">${n}</div>`).join('');
+  const pager = totalPages>1 ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding-top:2px">
+      <span style="font-size:12.5px;color:var(--mut-fg)">显示第 ${rangeStart}–${rangeEnd} 条 · 共 ${filteredCount} 个账号</span>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <button data-act="prevPage" style="${pgBtn(page===1)}">上一页</button>${pageChips}<button data-act="nextPage" style="${pgBtn(page===totalPages)}">下一页</button>
+      </div></div>` : '';
+
   return `<main style="max-width:1024px;margin:0 auto;padding:34px 24px 60px;display:flex;flex-direction:column;gap:22px">
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
       <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">账号管理</h1>
@@ -365,29 +385,93 @@ function accountsView(){
     </div>
     <div style="display:flex;align-items:center;gap:13px;padding:0 4px">
       <div data-act="toggleAll" style="${cbBox(allSel)}">${CHECK}</div>
-      <span style="font-size:12.5px;color:var(--mut-fg)">全选 · 共 ${accts.length} 个账号</span>
+      <span style="font-size:12.5px;color:var(--mut-fg)">全选本页 · 共 ${accts.length} 个账号</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <span style="font-size:12px;color:var(--mut-fg)">每页显示</span>
+        <div style="display:flex;gap:2px;padding:2px;background:var(--muted);border-radius:6px">${pageSizeSel}</div>
+        <span style="font-size:12px;color:var(--mut-fg)">条</span>
+      </div>
     </div>
     ${bulkBar}
     <div style="display:flex;flex-direction:column;gap:10px">
-      ${rows || `<div style="text-align:center;padding:48px 24px;border:1.5px dashed var(--border);border-radius:6px;color:var(--mut-fg)"><div style="font-size:14px;font-weight:500;color:var(--fg)">暂无账号</div><div style="margin-top:6px;font-size:12.5px">用 CLI \`python stt.py login\` 保存账号,或 \`pool warm\` 批量创建。</div></div>`}
+      ${rows || `<div style="text-align:center;padding:48px 24px;border:1.5px dashed var(--border);border-radius:6px;color:var(--mut-fg)"><div style="font-size:14px;font-weight:500;color:var(--fg)">暂无账号</div><div style="margin-top:6px;font-size:12.5px">点击「登录账号」保存已有账号,或「启动注册机」批量创建。</div></div>`}
     </div>
+    ${pager}
   </main>`;
 }
 function statCard(label,val){return `<div style="padding:14px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)"><div style="font-size:12px;color:var(--mut-fg)">${label}</div><div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${val}</div></div>`;}
 
 // ------------------------------------------------------------------ modals
+const SPINNER='<span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>';
 function modalsHTML(){
   let h='';
-  if(S.loginOpen) h+=`<div data-act="closeLogin" style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:440px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
-      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between"><div style="font-size:15px;font-weight:600">登录账号</div><div data-act="closeLogin" style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut-fg)">✕</div></div>
-      <div style="padding:22px;font-size:13px;color:var(--mut-fg);line-height:1.6">浏览器登录需要 Playwright,请在命令行运行:<br><br><span class="mono" style="color:var(--fg)">python stt.py login</span><br><br>登录完成后回到本页,账号会自动出现在列表中。</div>
-      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)"><button data-act="closeLogin" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">知道了</button><button data-act="reloadState" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">刷新列表</button></div>
+  if(S.loginOpen){
+    const busy=S.busy==='login', lg=S.login||{};
+    const body=busy
+      ? `<div style="padding:22px;display:flex;align-items:center;gap:11px;font-size:13px;color:var(--mut-fg)">${SPINNER}<span>正在登录 ElevenLabs 并获取令牌…</span></div>`
+      : `<div style="padding:22px;display:flex;flex-direction:column;gap:16px">
+          <p style="margin:0;font-size:12.5px;color:var(--mut-fg);line-height:1.55">输入你的 ElevenLabs 邮箱与密码,直接登录并把令牌保存到本机账号池(accounts.json),用于后续转录分配。</p>
+          <div style="display:flex;flex-direction:column;gap:7px">
+            <label style="font-size:13px;font-weight:500">邮箱</label>
+            <input data-input="login.email" value="${esc(lg.email||'')}" placeholder="you@example.com" style="height:40px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;outline:none" class="mono"/>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px">
+            <label style="font-size:13px;font-weight:500">密码</label>
+            <input data-input="login.password" data-enter="submitLogin" value="${esc(lg.password||'')}" type="password" placeholder="••••••••" style="height:40px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;outline:none" class="mono"/>
+          </div>
+        </div>`;
+    const foot=busy
+      ? `<button style="padding:9px 18px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:13.5px;font-weight:600;cursor:default">登录中…</button>`
+      : `<button data-act="closeLogin" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">取消</button><button data-act="doLogin" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">登录并保存</button>`;
+    h+=`<div data-act="${busy?'stop':'closeLogin'}" style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:440px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between"><div style="font-size:15px;font-weight:600">登录账号</div><div data-act="${busy?'stop':'closeLogin'}" style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut-fg)">✕</div></div>
+      ${body}
+      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)">${foot}</div>
     </div></div>`;
-  if(S.regOpen) h+=`<div data-act="closeReg" style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:520px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
-      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:9px"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg><span style="font-size:15px;font-weight:600">启动注册机</span></div><div data-act="closeReg" style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut-fg)">✕</div></div>
-      <div style="padding:22px;font-size:13px;color:var(--mut-fg);line-height:1.6">注册机需要临时邮箱后端与真实 Chrome 自动化,请在命令行运行:<br><br><span class="mono" style="color:var(--fg)">python stt.py pool warm --target 3</span><br><br>参数在 <span class="mono" style="color:var(--fg)">config.toml → [temp_email]</span> 配置。完成后点「刷新列表」。</div>
-      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)"><button data-act="closeReg" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">知道了</button><button data-act="reloadState" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">刷新列表</button></div>
+  }
+  if(S.regOpen){
+    const busy=S.busy==='register', r=S.reg||{};
+    const regIn=(field,ph,type)=>`<input data-input="reg.${field}" value="${esc(r[field]==null?'':r[field])}"${type?` type="${type}"`:''} placeholder="${ph}" style="width:100%;box-sizing:border-box;height:40px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;outline:none" class="mono"/>`;
+    const lbl=(t,code)=>`<label style="font-size:13px;font-weight:500">${t}${code?` <span class="mono" style="color:var(--mut-fg);font-weight:400;font-size:11.5px">${code}</span>`:''}</label>`;
+    const seg2=on=>`flex:1;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;${on?'background:var(--accent);color:var(--accent-fg)':'color:var(--mut-fg)'}`;
+    const body=busy
+      ? `<div style="padding:22px;display:flex;align-items:center;gap:11px;font-size:13px;color:var(--mut-fg)">${SPINNER}<span>注册机运行中 — 正在批量创建满额账号,可能需要几分钟,请勿关闭本页…</span></div>`
+      : `<div style="padding:22px;display:flex;flex-direction:column;gap:15px;max-height:calc(90vh - 150px);overflow:auto">
+          <p style="margin:0;font-size:12.5px;line-height:1.55;color:var(--mut-fg)">对应 <span class="mono" style="color:var(--fg)">config.toml → [temp_email]</span>。保存会写回本地配置文件(双向同步)。注册机调用临时邮箱后端申请邮箱、完成 ElevenLabs 验证并批量创建满额账号,写入本机账号池。</p>
+          <div style="display:flex;flex-direction:column;gap:7px">${lbl('临时邮箱后端地址','base_url')}${regIn('base_url','https://mail.example.com')}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:7px">${lbl('管理员密码','admin_password')}${regIn('admin_password','x-admin-auth','password')}</div>
+            <div style="display:flex;flex-direction:column;gap:7px">${lbl('站点密码','site_password')}${regIn('site_password','仅 needAuth 时填写','password')}</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:7px">${lbl('邮箱域名','domain')}${regIn('domain','example.com')}</div>
+            <div style="display:flex;flex-direction:column;gap:7px">${lbl('新地址接口','use_admin_path')}
+              <div style="display:flex;height:40px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+                <div data-act="setAdminPath" style="${seg2(r.use_admin_path!==false)}">/admin</div>
+                <div data-act="setApiPath" style="${seg2(r.use_admin_path===false)}">/api</div>
+              </div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:7px;min-width:0"><label style="font-size:13px;font-weight:500;white-space:nowrap">目标账号数</label>
+              <div style="display:flex;align-items:center;height:40px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+                <div data-act="decCount" style="width:36px;flex:none;height:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;color:var(--mut-fg);border-right:1px solid var(--border)">−</div>
+                <input data-input="reg.target" value="${esc(r.target)}" inputmode="numeric" style="flex:1;min-width:0;width:100%;box-sizing:border-box;text-align:center;border:none;outline:none;background:transparent;color:var(--fg);font-size:14px;font-weight:600" class="mono"/>
+                <div data-act="incCount" style="width:36px;flex:none;height:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;color:var(--mut-fg);border-left:1px solid var(--border)">+</div>
+              </div></div>
+            <div style="display:flex;flex-direction:column;gap:7px;min-width:0"><label style="font-size:13px;font-weight:500;white-space:nowrap">轮询间隔 (秒)</label>${regIn('poll_interval_secs','3')}</div>
+            <div style="display:flex;flex-direction:column;gap:7px;min-width:0"><label style="font-size:13px;font-weight:500;white-space:nowrap">轮询超时 (秒)</label>${regIn('poll_timeout_secs','120')}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:11px 14px;border-radius:6px;background:var(--muted2);border:1px solid var(--border);font-size:12px;color:var(--mut-fg)"><span class="mono" style="color:var(--fg)">pool warm --target ${esc(r.target)}</span> · 将满额账号补至 ${esc(r.target)} 个 · 每个含 10,000 满额度</div>
+        </div>`;
+    const foot=busy
+      ? `<button style="padding:9px 18px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:13.5px;font-weight:600;cursor:default">创建中…</button>`
+      : `<button data-act="closeReg" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">取消</button><button data-act="doRegSave" style="padding:9px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">保存</button><button data-act="doReg" style="display:flex;align-items:center;gap:7px;padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>开始批量创建</button>`;
+    h+=`<div data-act="${busy?'stop':'closeReg'}" style="position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:520px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:9px"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg><span style="font-size:15px;font-weight:600">启动注册机</span></div><div data-act="${busy?'stop':'closeReg'}" style="width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut-fg)">✕</div></div>
+      ${body}
+      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)">${foot}</div>
     </div></div>`;
+  }
   return h;
 }
 
@@ -395,7 +479,23 @@ function modalsHTML(){
 function render(){
   const app=document.getElementById('app');
   app.innerHTML = headerHTML() + (S.view==='transcribe'?transcribeView():accountsView()) + modalsHTML();
+  updateTopBtn();
 }
+
+// back-to-top: a single persistent button outside #app, shown on the accounts page
+// after scrolling. Kept off the render() innerHTML so scroll never re-renders the app.
+function updateTopBtn(){
+  let b=document.getElementById('toTop');
+  const show=S.view==='accounts' && (window.scrollY||document.documentElement.scrollTop||0)>400;
+  if(show&&!b){
+    b=document.createElement('button'); b.id='toTop'; b.title='回到顶部';
+    b.style.cssText='position:fixed;right:24px;bottom:24px;z-index:55;width:44px;height:44px;border-radius:999px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 22px rgba(0,0,0,.16);animation:pop .16s ease';
+    b.innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
+    b.onclick=()=>{try{window.scrollTo({top:0,behavior:'smooth'});}catch(e){window.scrollTo(0,0);}};
+    document.body.appendChild(b);
+  }else if(!show&&b){ b.remove(); }
+}
+window.addEventListener('scroll',updateTopBtn);
 
 // ------------------------------------------------------------- interactions
 async function refreshPlan(){
@@ -465,18 +565,26 @@ document.addEventListener('click',e=>{
     toggleSel(){S.selected=S.selected.includes(arg)?S.selected.filter(x=>x!==arg):[...S.selected,arg];render();},
     toggleRev(){S.revealed=S.revealed.includes(arg)?S.revealed.filter(x=>x!==arg):[...S.revealed,arg];render();},
     copyEmail(){try{navigator.clipboard.writeText(arg);toast('已复制邮箱');}catch(e){}},
-    toggleAll(){const list=visibleEmails();const all=list.every(x=>S.selected.includes(x));S.selected=all?[]:list;render();},
+    toggleAll(){const list=S._pageEmails;const all=list.length>0&&list.every(x=>S.selected.includes(x));S.selected=all?S.selected.filter(x=>!list.includes(x)):[...new Set([...S.selected,...list])];render();},
     clearSel(){S.selected=[];render();},
     toggleSort(){S.sortOpen=!S.sortOpen;render();},
-    pickSort(){S.sortKey=arg;S.sortOpen=false;render();},
-    toggleDir(){S.sortDir=S.sortDir==='asc'?'desc':'asc';render();},
+    pickSort(){S.sortKey=arg;S.sortOpen=false;S.page=1;render();},
+    toggleDir(){S.sortDir=S.sortDir==='asc'?'desc':'asc';S.page=1;render();},
+    prevPage(){S.page=Math.max(1,S._page-1);render();},
+    nextPage(){S.page=Math.min(S._totalPages,S._page+1);render();},
+    gotoPage(){S.page=+arg;render();},
+    setPageSize(){S.pageSize=+arg;S.page=1;render();},
     delOne(){if(confirm('删除账号 '+arg+' ?'))deleteAccounts([arg]);},
     delSel(){if(confirm('删除选中的 '+S.selected.length+' 个账号?'))deleteAccounts(S.selected.slice());},
     refreshSel(){refreshCredits(S.selected.slice());},
     exportSel(){exportAccounts(S.selected.slice());},
-    openLogin(){S.loginOpen=true;render();}, closeLogin(){S.loginOpen=false;render();},
-    openReg(){S.regOpen=true;render();}, closeReg(){S.regOpen=false;render();},
-    reloadState(){S.loginOpen=false;S.regOpen=false;reloadState();},
+    openLogin(){S.login={email:'',password:''};S.loginOpen=true;render();}, closeLogin(){if(S.busy!=='login'){S.loginOpen=false;render();}},
+    openReg(){const te=(S.data&&S.data.tempEmail)||{};S.reg={base_url:te.base_url||'',admin_password:te.admin_password||'',site_password:te.site_password||'',domain:te.domain||'',use_admin_path:te.use_admin_path!==false,poll_interval_secs:te.poll_interval_secs!=null?te.poll_interval_secs:3,poll_timeout_secs:te.poll_timeout_secs!=null?te.poll_timeout_secs:120,target:(S.data&&S.data.pool&&S.data.pool.target)||3};S.regOpen=true;render();}, closeReg(){if(S.busy!=='register'){S.regOpen=false;render();}},
+    setAdminPath(){S.reg.use_admin_path=true;render();}, setApiPath(){S.reg.use_admin_path=false;render();},
+    decCount(){S.reg.target=Math.max(1,(+S.reg.target||1)-1);render();}, incCount(){S.reg.target=(+S.reg.target||0)+1;render();},
+    doLogin(){runLogin();},
+    doRegSave(){runRegSave();},
+    doReg(){runRegister();},
     stop(){e.stopPropagation();},
   };
   if(act.startsWith('tg:')){const k=act.slice(3);S.params[k]=!S.params[k];render();return;}
@@ -487,23 +595,53 @@ document.addEventListener('input',e=>{
   const el=e.target.closest('[data-input]'); if(!el) return;
   const k=el.dataset.input;
   if(k==='pickFiles'){addFiles(el.files);}
-  else if(k==='query'){S.query=el.value;S.selected=[];render();document.querySelector('[data-input="query"]').focus();}
+  else if(k==='query'){S.query=el.value;S.selected=[];S.page=1;render();document.querySelector('[data-input="query"]').focus();}
+  else if(k.startsWith('login.')){if(S.login)S.login[k.slice(6)]=el.value;} // no render → keep focus
+  else if(k.startsWith('reg.')){if(S.reg)S.reg[k.slice(4)]=el.value;}   // no render → keep focus
   else if(k==='langQuery'){S.langQuery=el.value;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="langQuery"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
   else if(k==='keyterm'){S.keyterm=el.value;}
 });
 document.addEventListener('keydown',e=>{
   const el=e.target.closest('[data-enter]'); if(!el||e.key!=='Enter')return;
   if(el.dataset.enter==='addTerm'){const v=S.keyterm.trim();if(v&&!S.params.vocab.includes(v))S.params.vocab.push(v);S.keyterm='';render();}
+  else if(el.dataset.enter==='submitLogin'){if(S.busy!=='login')runLogin();}
 });
 
-function visibleEmails(){
-  const q=S.query.trim().toLowerCase();
-  return (S.data?S.data.accounts:[]).filter(a=>!q||(a.email||'').toLowerCase().includes(q)).map(a=>a.email);
-}
 async function reloadState(){S.data=await api('/api/state');render();}
 async function deleteAccounts(emails){S.data=await api('/api/accounts/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({emails})});S.selected=S.selected.filter(x=>!emails.includes(x));render();toast('已删除');}
 async function refreshCredits(emails){toast('刷新中…');S.data=await api('/api/accounts/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({emails})});render();toast('额度已刷新');}
 function exportAccounts(emails){const accts=(S.data?S.data.accounts:[]).filter(a=>emails.includes(a.email));const blob=new Blob([JSON.stringify(accts,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='accounts-export.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+
+// 登录账号 → email+password REST sign-in on the backend, saves the token to the pool
+async function runLogin(){
+  const email=((S.login&&S.login.email)||'').trim(), password=(S.login&&S.login.password)||'';
+  if(!email||!password){toast('请输入邮箱和密码');return;}
+  S.busy='login'; render();
+  try{
+    const res=await api('/api/accounts/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+    if(res.error){toast(res.error);}
+    else{S.data=res;S.loginOpen=false;toast('已登录并保存账号');}
+  }catch(e){toast('登录失败');}
+  S.busy=null; render();
+}
+// 启动注册机 config ↔ config.toml [temp_email]/[accounts].pool_target sync
+function regPayload(){const r=S.reg||{};return {temp_email:{base_url:r.base_url,admin_password:r.admin_password,site_password:r.site_password,domain:r.domain,use_admin_path:!!r.use_admin_path,poll_interval_secs:r.poll_interval_secs,poll_timeout_secs:r.poll_timeout_secs},pool_target:r.target};}
+async function saveRegConfig(){const res=await api('/api/config/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(regPayload())});if(res&&!res.error)S.data=res;return res;}
+async function runRegSave(){const res=await saveRegConfig();toast(res&&res.error?res.error:'配置已保存到 config.toml');render();}
+// real 启动注册机 → sync config to config.toml, then run `pool warm` to the target
+async function runRegister(){
+  const t=parseInt(String((S.reg&&S.reg.target)||'').replace(/[^0-9]/g,''),10);
+  if(!t||t<1){toast('请输入有效的目标数量');return;}
+  S.busy='register'; render();
+  try{
+    const saved=await saveRegConfig();                 // sync config.toml first
+    if(saved&&saved.error){toast(saved.error);S.busy=null;render();return;}
+    const res=await api('/api/accounts/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:t})});
+    if(res.error){toast(res.error);}
+    else{S.data=res;S.regOpen=false;toast('注册完成');}
+  }catch(e){toast('注册失败');}
+  S.busy=null; render();
+}
 
 // -------------------------------------------------------------------- boot
 (async function(){

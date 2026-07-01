@@ -103,6 +103,9 @@ def build_state() -> dict:
         "margin": acfg["selection_margin"],
         "freshThreshold": acfg["fresh_threshold"],
         "cps": stt.CREDITS_PER_SEC,
+        # temp_email/[accounts] config for the 启动注册机 modal (local single-user tool,
+        # so exposing the backend secrets to the localhost UI matches accounts.json).
+        "tempEmail": stt.temp_email_config(CONFIG_PATH),
     }
 
 
@@ -190,6 +193,92 @@ def do_delete(emails: list[str]) -> dict:
             store["active"] = None
         stt.save_accounts(store)
         return build_state()
+
+
+def do_login(email: str, password: str) -> dict:
+    """Log in with email+password via ElevenLabs' Firebase REST endpoint (no browser),
+    fetch credits, and save the account — the design's in-modal login.
+
+    ponytail: reuse stt.account_from_password_signin + refresh_credits (the same REST
+    sign-in tail register_one uses); no Playwright, no browser redirect. Marked source
+    'manual' since a human typed the credentials.
+    """
+    with _LOCK:
+        account = stt.account_from_password_signin(email, password)
+        account["source"] = "manual"
+        with stt.authed_client(account, save=lambda _s: None) as client:
+            client.get("/v1/user")
+            stt.refresh_credits(account, client)
+        store = stt.load_accounts()
+        stt.upsert_account(store, account)
+        stt.save_accounts(store)
+        return build_state()
+
+
+def do_register(target: int | None) -> dict:
+    """Warm the pool to `target` fresh accounts via the real register flow.
+
+    ponytail: delegate to stt.cmd_pool_warm (register_one + config.toml [temp_email]);
+    no in-browser config form, no logic copied here. target=None falls back to the
+    configured pool_target.
+    """
+    import argparse
+    stt.cmd_pool_warm(argparse.Namespace(target=target, config=str(CONFIG_PATH)))
+    return build_state()
+
+
+def _toml_scalar(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_scalar(x) for x in v) + "]"
+    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _dump_toml(data: dict) -> str:
+    """Serialise a dict-of-tables (our config.toml shape) back to TOML text.
+
+    ponytail: no stdlib TOML writer and config.toml is fully ours (flat [section] tables
+    of str/bool/int/float/list values), so a ~10-line dumper beats adding tomli_w. Round-
+    tripping drops the file's comment header — acceptable for a tool-managed config.
+    """
+    out = ["# Managed by web.py 启动注册机 — edits here sync with the UI.\n"]
+    for section, body in data.items():
+        out.append(f"[{section}]")
+        for k, v in body.items():
+            out.append(f"{k} = {_toml_scalar(v)}")
+        out.append("")
+    return "\n".join(out)
+
+
+def do_save_config(temp_email: dict, pool_target) -> dict:
+    """Persist the 启动注册机 params into config.toml [temp_email] + [accounts].pool_target,
+    preserving every other section/key. Keeps config.toml and the UI in sync."""
+    with _LOCK:
+        data = stt.load_toml(CONFIG_PATH)                 # full existing config (or {})
+        te = dict(stt.TEMP_EMAIL_DEFAULTS)
+        te.update(data.get("temp_email", {}))
+        for k, default in stt.TEMP_EMAIL_DEFAULTS.items():
+            if k in temp_email:
+                val = temp_email[k]
+                if isinstance(default, bool):
+                    te[k] = bool(val)
+                elif isinstance(default, int):
+                    try:
+                        te[k] = int(val)
+                    except (TypeError, ValueError):
+                        te[k] = default
+                else:
+                    te[k] = str(val)
+        data["temp_email"] = te
+        if pool_target:
+            acc = dict(data.get("accounts", {}))
+            acc["pool_target"] = int(pool_target)
+            data["accounts"] = acc
+        CONFIG_PATH.write_text(_dump_toml(data), encoding="utf-8")
+    return build_state()
 
 
 def do_transcribe(upload_ids: list[str], params: dict) -> dict:
@@ -327,6 +416,31 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 self._send_json(do_transcribe(body.get("uploads", []),
                                               body.get("params", {})))
+                return
+            if path == "/api/accounts/login":
+                body = self._read_json()
+                email = (body.get("email") or "").strip()
+                password = body.get("password") or ""
+                if not email or not password:
+                    self._send_json({"error": "请输入邮箱和密码"})
+                    return
+                try:
+                    self._send_json(do_login(email, password))
+                except SystemExit as e:      # bad credentials / firebase rejection
+                    self._send_json({"error": str(e)})
+                return
+            if path == "/api/config/save":
+                body = self._read_json()
+                self._send_json(do_save_config(body.get("temp_email", {}),
+                                               body.get("pool_target")))
+                return
+            if path == "/api/accounts/register":
+                target = self._read_json().get("target")
+                target = int(target) if target else None
+                try:
+                    self._send_json(do_register(target))
+                except SystemExit as e:      # temp_email/deps missing, etc.
+                    self._send_json({"error": str(e)})
                 return
             if path == "/api/accounts/refresh":
                 self._send_json(do_refresh(self._read_json().get("emails", [])))

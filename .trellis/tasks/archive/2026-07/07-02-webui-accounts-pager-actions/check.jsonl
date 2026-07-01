@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "register_one/pool-warm contracts must not be broken when web.py wires 启动注册机 to the real flow"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "reuse stt.cmd_login/cmd_pool_warm as-is instead of duplicating browser-automation logic"}
