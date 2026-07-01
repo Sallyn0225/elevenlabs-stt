@@ -595,7 +595,7 @@ document.addEventListener('input',e=>{
   const el=e.target.closest('[data-input]'); if(!el) return;
   const k=el.dataset.input;
   if(k==='pickFiles'){addFiles(el.files);}
-  else if(k==='query'){S.query=el.value;S.selected=[];S.page=1;render();document.querySelector('[data-input="query"]').focus();}
+  else if(k==='query'){S.query=el.value;S.selected=[];S.page=1;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="query"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
   else if(k.startsWith('login.')){if(S.login)S.login[k.slice(6)]=el.value;} // no render → keep focus
   else if(k.startsWith('reg.')){if(S.reg)S.reg[k.slice(4)]=el.value;}   // no render → keep focus
   else if(k==='langQuery'){S.langQuery=el.value;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="langQuery"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
