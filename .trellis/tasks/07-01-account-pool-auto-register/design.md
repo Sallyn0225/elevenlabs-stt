@@ -282,10 +282,10 @@ they do not block REST token capture.
 `register_one()` currently reuses the existing Chrome profile/window. If the previous
 run left Chrome logged in to the newly created ElevenLabs account, navigating to
 `/app/sign-up` redirects to `/app/onboarding`, so the next pool-warm attempt cannot
-start signup. Minimal fix next session: before each registration, use a fresh Chrome
-profile/session (or sign out/clear ElevenLabs site data) so signup always starts from
-an anonymous browser state. Prefer a temporary `--user-data-dir` per registration;
-that is less fragile than clicking sign-out UI.
+start signup. Implemented fix: before each registration, use a fresh Chrome profile/session so
+signup always starts from an anonymous browser state. Prefer a temporary
+`--user-data-dir` per registration; close the launched Chrome process tree and delete
+that profile in `finally` so pool warming does not leak browsers.
 
 ### Credentials (Q5, for next session — DO NOT COMMIT)
 - Real temp-email base URL, admin password, and domain are in local `config.toml`

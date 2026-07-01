@@ -40,6 +40,8 @@ function change over adding layers or services.
   `--user-data-dir=<tempdir>` for each account.
 - It must activate only the newly-created Chrome window. Never pick an arbitrary
   existing Chrome window; that can operate on the user's personal logged-in profile.
+- It must close the launched Chrome process tree and delete the temporary profile
+  directory in a `finally` block. Pool warming 10 accounts must not leave 10 browsers open.
 - Working signup order:
   1. temp-mail address
   2. real Chrome `/app/sign-up` email/password submit
@@ -55,6 +57,7 @@ function change over adding layers or services.
 ### 4. Validation & Error Matrix
 - No newly-created Chrome window detected -> abort before any clicks.
 - Existing Chrome only -> abort; do not operate on it.
+- Registration success or failure -> launched Chrome process tree is killed and temp profile is removed.
 - Verify modal not completed -> REST sign-in returns `email has not been verified`.
 - Temp-mail unavailable -> registration fails; single-account mode should still work
   when no temp-email config is present.
