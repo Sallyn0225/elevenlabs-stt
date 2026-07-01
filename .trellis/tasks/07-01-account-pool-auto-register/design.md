@@ -284,8 +284,9 @@ run left Chrome logged in to the newly created ElevenLabs account, navigating to
 `/app/sign-up` redirects to `/app/onboarding`, so the next pool-warm attempt cannot
 start signup. Implemented fix: before each registration, use a fresh Chrome profile/session so
 signup always starts from an anonymous browser state. Prefer a temporary
-`--user-data-dir` per registration; close the launched Chrome process tree and delete
-that profile in `finally` so pool warming does not leak browsers.
+`--user-data-dir` per registration; in `finally`, kill Chrome processes whose command
+line contains that exact temp profile name and delete the profile directory. Do not rely
+only on the launched PID tree because Chrome can re-parent child processes.
 
 ### Credentials (Q5, for next session — DO NOT COMMIT)
 - Real temp-email base URL, admin password, and domain are in local `config.toml`

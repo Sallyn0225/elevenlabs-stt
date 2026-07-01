@@ -40,8 +40,10 @@ function change over adding layers or services.
   `--user-data-dir=<tempdir>` for each account.
 - It must activate only the newly-created Chrome window. Never pick an arbitrary
   existing Chrome window; that can operate on the user's personal logged-in profile.
-- It must close the launched Chrome process tree and delete the temporary profile
-  directory in a `finally` block. Pool warming 10 accounts must not leave 10 browsers open.
+- It must close Chrome processes whose command line contains the exact temporary profile
+  name and delete the temporary profile directory in a `finally` block. Do not rely only
+  on the `Popen` PID tree: Chrome can re-parent child processes. Pool warming 10 accounts
+  must not leave 10 browsers open.
 - Working signup order:
   1. temp-mail address
   2. real Chrome `/app/sign-up` email/password submit

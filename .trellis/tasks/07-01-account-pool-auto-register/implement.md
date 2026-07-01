@@ -6,10 +6,10 @@
 > succeeds and `/v1/user/subscription` returns 10000 credits. Step 5 wired in working tree;
 > `stt transcribe _tmp-sample.m4a --show-cost` selected the auto account and completed.
 > Step 6 now launches each registration with a fresh temporary Chrome `--user-data-dir`,
-> only activates the newly-created Chrome window, cleans up the launched Chrome process tree/profile,
-> and transcribe runs auto-refill after refreshing post-use credits. Live validation:
-> `stt pool warm --target 1`, `--target 2`, and `--target 3`
-> all succeeded with fresh accounts.
+> only activates the newly-created Chrome window, cleans up Chrome processes matching the temp
+> profile name, and transcribe runs auto-refill after refreshing post-use credits. Live validation:
+> `stt pool warm --target 1`, `--target 2`, `--target 3`, and later `--target 10`
+> all succeeded with fresh accounts; temp Chrome process/profile counts returned to 0.
 > Q5 creds are in local config.toml (gitignored).
 
 Inline workflow (Pi): the main session edits `stt.py` directly. Each step ends
