@@ -661,13 +661,22 @@ def register_one() -> dict[str, Any]:
             refresh_credits(account, client)
         return account
     finally:
-        if proc is not None:
-            if shutil.which("taskkill"):
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                proc.terminate()
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        if shutil.which("powershell"):
+            profile_name = pathlib.Path(profile_dir).name.replace("'", "''")
+            subprocess.run([
+                "powershell", "-NoProfile", "-Command",
+                f"$profile = '{profile_name}'; "
+                "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+                "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif proc is not None:
+            proc.terminate()
+        for _ in range(5):
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            if not pathlib.Path(profile_dir).exists():
+                break
+            time.sleep(0.5)
 
 
 def fresh_count(store: dict[str, Any], threshold: int) -> int:
