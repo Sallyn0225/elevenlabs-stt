@@ -87,6 +87,7 @@ python web.py            # 打开 http://127.0.0.1:8756
 - **账号管理页**：读取 `accounts.json`，支持搜索/排序/多选/分页与回顶、真实刷新额度、删除、导出 JSON。
 - **登录账号**：弹窗输入邮箱+密码，走 Firebase REST 直接登录并把令牌保存到 `accounts.json`（无需浏览器）。
 - **启动注册机**：弹窗提供完整参数（对应 `config.toml → [temp_email]` 与目标满额账号数），「保存」会写回 `config.toml`（与配置文件双向同步）；「开始批量创建」先保存配置再跑真实 `pool warm` 批量注册。
+- **功能管理 · 长音频切分页**：上传长音频 → 后端按静音点计算贪心切分方案（每段落在单个满额账号额度内）→ 执行切分并无损导出片段到本地 `out/`，供后续转录；与 CLI `--split` 共用 `audio_split.py` 的切分逻辑。
 - 账号池不足以覆盖所有文件时，转录页会提示先 `pool warm`，不会静默注册。
 
 零额外依赖、零构建；须在项目根目录运行（需 `accounts.json`、`config.toml`）。
@@ -199,6 +200,9 @@ python stt.py transcribe interview.m4a --split --chunk-secs 480 --silence-db -35
 | 文件 | 说明 |
 |---|---|
 | `stt.py` | CLI 与客户端主程序 |
+| `audio_split.py` | 静音检测与切分模块（CLI `--split` 与 Web UI 共用） |
+| `web.py` | 本地 Web UI 服务端（标准库） |
+| `webui.html` | Web UI 单页前端 |
 | `config.example.toml` | 配置示例 |
 | `requirements.txt` | 依赖 |
 | `session.json` | `login` 生成（凭证，已 gitignore） |
