@@ -45,7 +45,8 @@ auto_refill = true
 # 查看账号和缓存额度
 python stt.py accounts
 
-# 强制从 API 刷新额度
+# 强制从 API 刷新额度（8 线程并发，全部完成后一次性写盘；
+# stderr 的 refreshed 进度行按完成先后输出，最终列表顺序不变）
 python stt.py accounts --refresh
 
 # 只刷新指定账号（可重复 -e 指定多个）；其余账号不发网络请求

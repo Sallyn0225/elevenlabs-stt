@@ -45,7 +45,8 @@ Leave `[temp_email]` empty/commented if you only want single-account mode via `p
 # Show stored accounts and cached remaining credits
 python stt.py accounts
 
-# Force-refresh remaining credits from the API
+# Force-refresh remaining credits from the API (8 threads in parallel, one save at the end;
+# stderr "refreshed" lines appear in completion order; the final listing order is unchanged)
 python stt.py accounts --refresh
 
 # Refresh only specific account(s) (repeat -e for several); others get no network call

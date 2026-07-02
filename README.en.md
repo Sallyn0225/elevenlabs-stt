@@ -84,7 +84,7 @@ python web.py            # opens http://127.0.0.1:8756
 ```
 
 - **Transcribe page**: drag/multi-select audio → the browser measures duration and estimates credits → auto-allocates accounts by remaining credits (best-fit) → "Start" does the real upload, polling, and export, auto-downloading subtitles when done.
-- **Accounts page**: reads `accounts.json`, with search/sort/multi-select/pagination and back-to-top, real credit refresh, delete, and JSON export.
+- **Accounts page**: reads `accounts.json`, with search/sort/multi-select/pagination and back-to-top, real credit refresh (selected accounts only, fetched concurrently), delete, and JSON export.
 - **Log in**: a dialog takes email + password, logs in via Firebase REST directly and saves the token to `accounts.json` (no browser needed).
 - **Start the registrar**: a dialog exposes the full parameters (mapping to `config.toml → [temp_email]` and the target full-account count); "Save" writes back to `config.toml` (two-way sync with the config file); "Start batch create" saves the config first, then runs a real `pool warm` batch registration.
 - **Tools · long-audio split page**: upload long audio → the backend computes a greedy silence-based cut plan (each part fits one full free account's quota) → run the split and losslessly export the parts to local `out/` for later transcription; shares `audio_split.py` with the CLI `--split`.
@@ -131,7 +131,7 @@ stt selfcheck          offline self-check (no network)
 | Flag | Description |
 |---|---|
 | `-c, --config` | Config file path (default `config.toml`) |
-| `--refresh` | Force-refresh credits from the API |
+| `--refresh` | Force-refresh credits from the API (8 threads in parallel; stderr progress in completion order) |
 | `-e, --email` | Only act on this account (repeatable); filters both `--refresh` scope and listing by email |
 
 ## Languages
