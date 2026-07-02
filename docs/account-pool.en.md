@@ -14,6 +14,10 @@ This optional mode keeps several ElevenLabs free accounts available and picks th
 | `accounts.json` | Account tokens and remaining-credit cache; gitignored |
 | `config.example.toml` | Safe example config |
 
+## Mail backend
+
+Auto-registration needs a self-hosted [`cloudflare_temp_email`](https://github.com/dreamhunter2333/cloudflare_temp_email) backend to receive verification emails. Deployment steps and which endpoints this project calls are in [`temp-email-backend.en.md`](./temp-email-backend.en.md). The `[temp_email]` fields below — `base_url` / `domain` / `admin_password` / `site_password` — all come from that backend.
+
 ## Configure
 
 Copy `config.example.toml` to `config.toml`, then fill these sections:

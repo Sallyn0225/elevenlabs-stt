@@ -131,7 +131,7 @@ stt selfcheck          离线自检（不联网）
 
 ## 多账号额度池（可选）
 
-配置 `[temp_email]` 和 `[accounts]` 后，脚本可以维护多个免费账号：转录时自动选择够用且剩余额度最小的账号，成功后按 `pool_target` 自动补池。详见 [`docs/account-pool.md`](./docs/account-pool.md)。不配置 `[temp_email]` 时仍是普通单账号模式。
+配置 `[temp_email]` 和 `[accounts]` 后，脚本可以维护多个免费账号：转录时自动选择够用且剩余额度最小的账号，成功后按 `pool_target` 自动补池。详见 [`docs/account-pool.md`](./docs/account-pool.md)；`[temp_email]` 依赖的临时邮箱后端部署见 [`docs/temp-email-backend.md`](./docs/temp-email-backend.md)。不配置 `[temp_email]` 时仍是普通单账号模式。
 
 ## 批量转录与自动分配
 
@@ -169,6 +169,7 @@ stt selfcheck          离线自检（不联网）
 | `session.json` | `login` 生成（凭证，已 gitignore） |
 | `accounts.json` | 多账号池生成（凭证，已 gitignore） |
 | `docs/account-pool.md` | 多账号池与自动注册说明 |
+| `docs/temp-email-backend.md` | 临时邮箱后端（cloudflare_temp_email）集成说明 |
 | `docs/api-contract.md` | 抓包得到的内部 API 契约 |
 
 ## 自检

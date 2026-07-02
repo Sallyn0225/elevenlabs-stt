@@ -14,6 +14,10 @@
 | `accounts.json` | 账号 token 与额度缓存；已 gitignore |
 | `config.example.toml` | 安全示例配置 |
 
+## 邮箱后端
+
+自动注册需要一个自部署的 [`cloudflare_temp_email`](https://github.com/dreamhunter2333/cloudflare_temp_email) 后端来接收验证邮件。部署步骤与本项目调用哪些端点见 [`temp-email-backend.md`](./temp-email-backend.md)。下方 `[temp_email]` 的 `base_url` / `domain` / `admin_password` / `site_password` 都来自该后端。
+
 ## 配置
 
 复制 `config.example.toml` 为 `config.toml`，填写：
