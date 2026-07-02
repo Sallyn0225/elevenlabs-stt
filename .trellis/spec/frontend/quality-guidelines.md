@@ -24,7 +24,25 @@ Questions to answer:
 
 <!-- Patterns that should never be used and why -->
 
-(To be filled by the team)
+### Entrance animations that change final position
+
+Do not reuse a keyframe that animates `transform` on elements whose final layout
+position is owned by flex/grid/absolute/fixed positioning unless the keyframe's
+`to` transform exactly matches the element's normal final transform.
+
+Wrong:
+
+```css
+@keyframes pop{from{transform:translateX(-50%) translateY(6px)}to{transform:translateX(-50%)}}
+/* Used on a normal flex child: it renders offset, then snaps when animation ends. */
+```
+
+Correct:
+
+```css
+@keyframes pop{from{opacity:0}to{opacity:1}}
+/* If motion is needed, create a keyframe scoped to that element's real final transform. */
+```
 
 ---
 
@@ -32,7 +50,9 @@ Questions to answer:
 
 <!-- Patterns that must always be used -->
 
-(To be filled by the team)
+- First-render UI affordances such as selection bars, dropdowns, modals, toasts,
+  and floating buttons must appear at their final position immediately. Fade-only
+  entrance is the safe default.
 
 ---
 
