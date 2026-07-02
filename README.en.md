@@ -72,13 +72,29 @@ Copy `config.example.toml` → `config.toml` for persistent defaults; CLI flags 
 | `poll_timeout_secs` | Poll timeout in seconds | `600` |
 | `show_cost` | Print estimated credit cost before upload | `false` |
 
+## Local Web UI (optional)
+
+Beyond the CLI, `web.py` spins up a local web page using the standard library, reusing `stt.py`'s transcription and account logic:
+
+```bash
+python web.py            # opens http://127.0.0.1:8756
+```
+
+- **Transcribe page**: drag/multi-select audio → the browser measures duration and estimates credits → auto-allocates accounts by remaining credits (best-fit) → "Start" does the real upload, polling, and export, auto-downloading subtitles when done.
+- **Accounts page**: reads `accounts.json`, with search/sort/multi-select/pagination and back-to-top, real credit refresh, delete, and JSON export.
+- **Log in**: a dialog takes email + password, logs in via Firebase REST directly and saves the token to `accounts.json` (no browser needed).
+- **Start the registrar**: a dialog exposes the full parameters (mapping to `config.toml → [temp_email]` and the target full-account count); "Save" writes back to `config.toml` (two-way sync with the config file); "Start batch create" saves the config first, then runs a real `pool warm` batch registration.
+- When the pool can't cover all files, the transcribe page prompts you to `pool warm` first — it never registers silently.
+
+Zero extra dependencies, zero build; must be run from the project root (needs `accounts.json`, `config.toml`).
+
 ## Command reference
 
 ```
 stt login              one-time browser login → session.json
 stt transcribe <audio> [<audio> ...]  transcribe one or more audio files (batch)
 stt accounts           show accounts and remaining credits
-stt pool status        show fresh/usable/depleted account counts
+stt pool status        show fresh/usable/depleted/invalid account counts
 stt pool warm          register accounts until the fresh target is met
 stt list-languages     print supported language names + codes
 stt selfcheck          offline self-check (no network)
@@ -100,6 +116,14 @@ stt selfcheck          offline self-check (no network)
 | `--show-cost` | Print estimated credit cost |
 | `--poll-timeout` | Poll timeout in seconds |
 | `--dry-run` | Print the allocation plan and exit — no registration, no upload |
+
+`accounts` flags:
+
+| Flag | Description |
+|---|---|
+| `-c, --config` | Config file path (default `config.toml`) |
+| `--refresh` | Force-refresh credits from the API |
+| `-e, --email` | Only act on this account (repeatable); filters both `--refresh` scope and listing by email |
 
 ## Languages
 
