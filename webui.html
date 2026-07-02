@@ -458,7 +458,7 @@ function modalsHTML(){
   }
   if(S.regOpen){
     const busy=S.busy==='register', r=S.reg||{};
-    const regIn=(field,ph,type)=>`<input data-input="reg.${field}" value="${esc(r[field]==null?'':r[field])}"${type?` type="${type}"`:''} placeholder="${ph}" style="width:100%;box-sizing:border-box;height:40px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;outline:none" class="mono"/>`;
+    const regIn=(field,ph,type,extra)=>`<input data-input="reg.${field}" value="${esc(r[field]==null?'':r[field])}"${type?` type="${type}"`:''}${extra||''} placeholder="${ph}" style="width:100%;box-sizing:border-box;height:40px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;outline:none" class="mono"/>`;
     const lbl=(t,code)=>`<label style="font-size:13px;font-weight:500">${t}${code?` <span class="mono" style="color:var(--mut-fg);font-weight:400;font-size:11.5px">${code}</span>`:''}</label>`;
     const seg2=on=>`flex:1;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;${on?'background:var(--accent);color:var(--accent-fg)':'color:var(--mut-fg)'}`;
     const body=busy
@@ -471,7 +471,7 @@ function modalsHTML(){
             <div style="display:flex;flex-direction:column;gap:7px">${lbl('站点密码','site_password')}${regIn('site_password','仅 needAuth 时填写','password')}</div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div style="display:flex;flex-direction:column;gap:7px">${lbl('邮箱域名','domain')}${regIn('domain','example.com')}</div>
+            <div style="display:flex;flex-direction:column;gap:7px">${lbl('邮箱域名','domain')}${regIn('domain','选择或输入新域名',null,' list="regDomains"')}<datalist id="regDomains">${(r.domains||[]).map(d=>`<option value="${esc(d)}"></option>`).join('')}</datalist></div>
             <div style="display:flex;flex-direction:column;gap:7px">${lbl('新地址接口','use_admin_path')}
               <div style="display:flex;height:40px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
                 <div data-act="setAdminPath" style="${seg2(r.use_admin_path!==false)}">/admin</div>
@@ -891,7 +891,7 @@ document.addEventListener('click',e=>{
     exportSel(){exportAccounts(S.selected.slice());},
     closeImport(){S.importOpen=null;render();},
     openLogin(){S.login={email:'',password:''};S.loginOpen=true;render();}, closeLogin(){if(S.busy!=='login'){S.loginOpen=false;render();}},
-    openReg(){const te=(S.data&&S.data.tempEmail)||{};S.reg={base_url:te.base_url||'',admin_password:te.admin_password||'',site_password:te.site_password||'',domain:te.domain||'',use_admin_path:te.use_admin_path!==false,poll_interval_secs:te.poll_interval_secs!=null?te.poll_interval_secs:3,poll_timeout_secs:te.poll_timeout_secs!=null?te.poll_timeout_secs:120,target:(S.data&&S.data.pool&&S.data.pool.target)||3};S.regOpen=true;render();}, closeReg(){if(S.busy!=='register'){S.regOpen=false;render();}},
+    openReg(){const te=(S.data&&S.data.tempEmail)||{};S.reg={base_url:te.base_url||'',admin_password:te.admin_password||'',site_password:te.site_password||'',domain:te.domain||'',domains:te.domains||[],use_admin_path:te.use_admin_path!==false,poll_interval_secs:te.poll_interval_secs!=null?te.poll_interval_secs:3,poll_timeout_secs:te.poll_timeout_secs!=null?te.poll_timeout_secs:120,target:(S.data&&S.data.pool&&S.data.pool.target)||3};S.regOpen=true;render();}, closeReg(){if(S.busy!=='register'){S.regOpen=false;render();}},
     setAdminPath(){S.reg.use_admin_path=true;render();}, setApiPath(){S.reg.use_admin_path=false;render();},
     decCount(){S.reg.target=Math.max(1,(+S.reg.target||1)-1);render();}, incCount(){S.reg.target=(+S.reg.target||0)+1;render();},
     doLogin(){runLogin();},

@@ -334,8 +334,13 @@ def do_save_config(temp_email: dict, pool_target) -> dict:
                         te[k] = int(val)
                     except (TypeError, ValueError):
                         te[k] = default
+                elif isinstance(default, list):
+                    te[k] = [str(x) for x in val] if isinstance(val, list) else te[k]
                 else:
                     te[k] = str(val)
+        # 输入即新建: a domain typed in the UI joins the dropdown candidates
+        if te["domain"] and te["domain"] not in te["domains"]:
+            te["domains"] = list(te["domains"]) + [te["domain"]]
         data["temp_email"] = te
         if pool_target:
             acc = dict(data.get("accounts", {}))

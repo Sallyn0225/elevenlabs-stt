@@ -65,6 +65,7 @@ TEMP_EMAIL_DEFAULTS: dict[str, Any] = {
     "admin_password": "",      # x-admin-auth (admin path; bypasses gates)
     "site_password": "",       # x-custom-auth, only if /open_api/settings needAuth
     "domain": "",              # a domain from /open_api/settings domains[]
+    "domains": [],             # all usable domains; UI dropdown candidates
     "use_admin_path": True,    # /admin/new_address vs /api/new_address
     "poll_interval_secs": 3,
     "poll_timeout_secs": 120,

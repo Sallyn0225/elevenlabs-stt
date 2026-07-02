@@ -19,6 +19,7 @@ base_url = "https://mail.example.com"   # your cloudflare_temp_email backend
 admin_password = ""                      # x-admin-auth; preferred path (bypasses gates)
 site_password = ""                       # x-custom-auth, only if /open_api/settings needAuth
 domain = "example.com"                   # a domain from /open_api/settings domains[]
+domains = ["example.com"]                # all usable domains; webui 域名下拉候选
 use_admin_path = true                    # /admin/new_address vs /api/new_address
 poll_interval_secs = 3
 poll_timeout_secs = 120
