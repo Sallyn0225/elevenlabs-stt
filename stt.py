@@ -584,11 +584,43 @@ def register_one() -> dict[str, Any]:
 
     # ponytail: fresh profile per account avoids logged-in Chrome redirecting sign-up to onboarding.
     # Coordinates are ugly, but selector automation triggers hCaptcha; real Chrome doesn't.
-    def window_key(w: Any) -> Any:
-        return getattr(w, "_hWnd", None) or (w.title, w.left, w.top, w.width, w.height)
+    def profile_window_handles() -> set[int]:
+        if not shutil.which("powershell"):
+            return set()
+        profile_name = pathlib.Path(profile_dir).name.replace("'", "''")
+        ps = (
+            f"$profile = '{profile_name}'; "
+            "$pids = @(Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+            "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) } | "
+            "Select-Object -ExpandProperty ProcessId); "
+            "if ($pids.Count -gt 0) { "
+            "Get-Process -Id $pids -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.MainWindowHandle -ne 0 } | "
+            "ForEach-Object { $_.MainWindowHandle } "
+            "}"
+        )
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                 capture_output=True, text=True, timeout=3)
+        except Exception:
+            return set()
+        handles: set[int] = set()
+        for line in out.stdout.splitlines():
+            try:
+                handles.add(int(line.strip()))
+            except ValueError:
+                pass
+        return handles
 
-    before_windows = {window_key(w) for w in gw.getAllWindows()
-                      if "Google Chrome" in w.title}
+    chrome_startup_kwargs = {}
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 1  # SW_SHOWNORMAL: do not inherit a hidden Web UI process state.
+        chrome_startup_kwargs = {
+            "startupinfo": startupinfo,
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+        }
     proc = None
     try:
         proc = subprocess.Popen([
@@ -598,54 +630,129 @@ def register_one() -> dict[str, Any]:
             "--new-window",
             "--window-position=40,40",
             "--disable-save-password-bubble",
+            "--do-not-de-elevate",
             "https://elevenlabs.io/app/sign-up",
-        ])
+        ], **chrome_startup_kwargs)
         new_window = None
         # 30s: a brand-new profile cold-starts slowly (profile init + AV scan); 10s
         # missed the window on busy machines and the finally-block killed late Chrome.
         deadline = time.time() + 30
+        next_profile_probe = 0.0
         while time.time() < deadline and new_window is None:
             time.sleep(0.5)
+            profile_handles = set()
+            if time.time() >= next_profile_probe:
+                profile_handles = profile_window_handles()
+                next_profile_probe = time.time() + 1.0
             for w in gw.getAllWindows():
-                if "Google Chrome" in w.title and window_key(w) not in before_windows:
+                hwnd = getattr(w, "_hWnd", None)
+                if hwnd in profile_handles:
                     new_window = w
                     break
         if new_window is None:
             raise SystemExit("auto-register could not find the new temporary Chrome window; aborting")
-        new_window.restore(); new_window.activate(); new_window.maximize()
+
+        def window_op(name: str) -> None:
+            try:
+                getattr(new_window, name)()
+            except Exception as e:
+                # pygetwindow/pywin32 can report Windows error code 0 ("success")
+                # after the window operation actually completed. Treat only that
+                # wrapper bug as non-fatal; real focus/window errors should abort.
+                if "Error code from Windows: 0" not in str(e):
+                    raise
+
+        window_op("restore")
+        window_op("activate")
+        window_op("maximize")
         time.sleep(4)
 
+        def ensure_window_foreground() -> None:
+            hwnd = getattr(new_window, "_hWnd", None)
+            if not hwnd or os.name != "nt":
+                window_op("activate")
+                return
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            # Fast path: already foreground. Forcing anyway is what caused the
+            # constant restore/maximize flicker between every automation action.
+            if user32.GetForegroundWindow() == hwnd:
+                return
+            SW_RESTORE = 9
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_SHOWWINDOW = 0x0040
+            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+            for attempt in range(8):
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                # AttachThreadInput to the current foreground thread satisfies
+                # Windows' foreground-lock rules. A synthetic Alt tap also works
+                # but toggles Chrome's menu-accelerator mode, breaking in-window
+                # keyboard focus for the very keys we send next.
+                fg = user32.GetForegroundWindow()
+                fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+                cur_tid = kernel32.GetCurrentThreadId()
+                attached = fg_tid and fg_tid != cur_tid and user32.AttachThreadInput(cur_tid, fg_tid, True)
+                try:
+                    user32.BringWindowToTop(hwnd)
+                    user32.SetForegroundWindow(hwnd)
+                    if attempt >= 4:  # last resort: topmost toggle
+                        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+                        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+                finally:
+                    if attached:
+                        user32.AttachThreadInput(cur_tid, fg_tid, False)
+                time.sleep(0.2)
+                if user32.GetForegroundWindow() == hwnd:
+                    return
+            raise SystemExit("auto-register could not focus the temporary Chrome window; aborting before sending keys")
+
+        def hotkey(*keys: str) -> None:
+            ensure_window_foreground()
+            pyautogui.hotkey(*keys)
+
+        def press(key: str) -> None:
+            ensure_window_foreground()
+            pyautogui.press(key)
+
         def click_frac(x_frac: float, y_frac: float) -> None:
+            ensure_window_foreground()
             pyautogui.click(new_window.left + int(new_window.width * x_frac),
                             new_window.top + int(new_window.height * y_frac))
+            time.sleep(0.1)
 
         def paste(text: str) -> None:
+            ensure_window_foreground()
             pyperclip.copy(text)
             pyautogui.hotkey("ctrl", "v")
 
-        pyautogui.hotkey("ctrl", "l")
+        hotkey("ctrl", "l")
         paste("https://elevenlabs.io/app/sign-up")
-        pyautogui.press("enter")
+        press("enter")
         time.sleep(12)
 
         click_frac(0.50, 0.56)  # signup email
-        pyautogui.hotkey("ctrl", "a"); paste(email)
-        pyautogui.press("tab"); paste(password)
-        pyautogui.press("enter")
+        hotkey("ctrl", "a"); paste(email)
+        press("tab"); paste(password)
+        press("enter")
 
         link = latest_verify_link(addr["jwt"])
-        pyautogui.hotkey("ctrl", "l")
+        hotkey("ctrl", "l")
         paste(link)
-        pyautogui.press("enter")
+        press("enter")
         time.sleep(15)
-        pyautogui.press("enter")  # modal Continue if focused
+        press("enter")  # modal Continue if focused
         click_frac(0.50, 0.62)
         click_frac(0.65, 0.62)  # verification modal Continue fallback
         time.sleep(8)
         click_frac(0.50, 0.62)  # sign-in email
-        pyautogui.hotkey("ctrl", "a"); paste(email)
-        pyautogui.press("tab"); paste(password)
-        pyautogui.press("enter")
+        hotkey("ctrl", "a"); paste(email)
+        press("tab"); paste(password)
+        press("enter")
         time.sleep(15)
 
         account = account_from_password_signin(email, password, temp_address=email)
