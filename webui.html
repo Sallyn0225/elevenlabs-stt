@@ -41,7 +41,7 @@ const S = {
           tag_audio_events:true,include_subtitles:true,no_verbatim:false,
           use_speaker_library:false,show_cost:false},
   keyterm:'', langOpen:false, langQuery:'', acctMode:'auto', mode:'batch',
-  plan:null, status:'idle', results:[],
+  plan:null, status:'idle', phase:'', results:[],
   // accounts view
   query:'', sortKey:'created', sortDir:'desc', sortOpen:false,
   selected:[], revealed:[],
@@ -99,6 +99,11 @@ function headerHTML(){
 }
 
 // --------------------------------------------------------- transcribe view
+const MERGEABLE=['srt','vtt','txt'];   // 可合并导出格式,与 stt._MERGERS 保持一致
+const splitInfo=name=>((S.plan&&S.plan.files)||[]).find(x=>x.name===name)||null;
+// 需切分 = 时长超过单满额账号可转录秒数(chunkSecs,由 /api/state 下发)
+const splitFiles=()=>S.files.filter(f=>!f.uploading&&f.duration&&S.data&&f.duration>S.data.chunkSecs);
+
 function fileRowHTML(f,i){
   const done=S.status==='done';
   const right = done && !f.failed
@@ -108,7 +113,11 @@ function fileRowHTML(f,i){
   return `<div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
     <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--mut-fg);border:1px solid var(--border)" class="mono">${esc(f.ext)}</div>
     <div style="flex:1;min-width:0">
-      <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</div>
+      <div style="display:flex;align-items:center;gap:8px;min-width:0">
+        <span style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</span>
+        ${(si=>si&&si.segCount?`<span style="flex:none;font-size:11px;color:var(--amber);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">将切分为 ${si.segCount} 段</span>`
+          :si&&si.splitError?`<span title="${esc(si.splitError)}" style="flex:none;font-size:11px;color:var(--red)">切分失败</span>`:'')(splitInfo(f.name))}
+      </div>
       <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${esc(humanSize(f.size))} · ${esc(dur2str(f.duration))}</div>
     </div>
     <div style="flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut-fg);background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 9px" class="mono">≈ ${credits}<span style="opacity:.55">credits</span></div>
@@ -281,7 +290,7 @@ function transcribeView(){
 function actionBarHTML(totalNeed,allocCount){
   let inner;
   if(S.status==='running'){
-    inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg)"><span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>转录中 · 上传并轮询任务状态…</div>
+    inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg)"><span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>${esc(S.phase||'转录中 · 上传并轮询任务状态…')}</div>
       <button style="padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:default">处理中…</button>`;
   } else if(S.status==='done'){
     const ok=S.results.filter(r=>r.ok).length;
@@ -290,6 +299,9 @@ function actionBarHTML(totalNeed,allocCount){
         <button data-act="reset" style="padding:10px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;font-weight:500;cursor:pointer">重新开始</button>
         <button data-act="downloadAll" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer">全部下载</button>
       </div>`;
+  } else if(splitFiles().length&&!MERGEABLE.includes(S.params.format)){
+    inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--amber)">${S.params.format.toUpperCase()} 格式不支持长音频切分合并，请改用 SRT / VTT / TXT</div>
+      <button style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:not-allowed">开始转录</button>`;
   } else {
     inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut-fg)"><span>预计消耗</span><b style="color:var(--fg)" class="mono">${fmt(totalNeed)}</b><span>credits</span><span style="opacity:.5">·</span><span>覆盖 ${allocCount} 个账号</span></div>
       <button data-act="start" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>开始转录</button>`;
@@ -702,7 +714,7 @@ async function refreshPlan(){
   const ready=S.files.filter(f=>!f.uploading);
   if(!ready.length){ S.plan=null; return; }
   S.plan=await api('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({files:ready.map(f=>({name:f.name,duration:f.duration}))})});
+    body:JSON.stringify({files:ready.map(f=>({id:f.id,name:f.name,duration:f.duration}))})});
   render();
 }
 
@@ -766,10 +778,34 @@ async function runSplitExec(){
 async function startTranscribe(){
   const uploads=S.files.filter(f=>f.id&&!f.uploading).map(f=>f.id);
   if(!uploads.length){ toast('没有已就绪的文件'); return; }
+  // 执行前确认:切分方案 + 注册缺口合并为一个弹窗,取消则零副作用
+  const splits=((S.plan&&S.plan.files)||[]).filter(x=>x.segCount);
+  const reg=(S.plan&&S.plan.registerCount)||0;
+  let confirmed=false;
+  if(splits.length||reg){
+    const parts=[];
+    if(splits.length)parts.push(`${splits.length} 个文件将切分为 ${splits.reduce((a,x)=>a+x.segCount,0)} 段`);
+    if(reg)parts.push(`需注册 ${reg} 个新账号`);
+    if(!confirm(parts.join('，')+'，是否继续？'))return;
+    confirmed=true;
+  }
   S.status='running'; render();
-  const res=await api('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({uploads,params:S.params})});
-  if(res.error){ S.status='idle'; render(); toast(res.error); return; }
+  // 阶段文案纯装饰轮换(与切分工具页同模式),真实进度在后端阻塞请求里
+  const phases=splits.length?['切分音频…',...(reg?['注册账号…']:[]),'转录分段…','合并字幕…']:null;
+  let timer=null;
+  if(phases){let pi=0;S.phase=phases[0];timer=setInterval(()=>{pi=(pi+1)%phases.length;S.phase=phases[pi];render();},2500);}
+  const send=flag=>api('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({uploads,params:S.params,confirmRegister:flag})});
+  let res;
+  try{
+    res=await send(confirmed);
+    if(res.needRegister){   // 预览与实际余额有偏差时的后端兜底
+      if(confirm(`需注册 ${res.needRegister} 个新账号，是否继续？`)) res=await send(true);
+      else { S.status='idle'; render(); return; }
+    }
+  }catch(e){ S.status='idle'; render(); toast('转录请求失败'); return; }
+  finally{ if(timer)clearInterval(timer); S.phase=''; }
+  if(res.error){ if(res.state)S.data=res.state; S.status='idle'; render(); toast(res.error); return; } // res.state: 注册中途失败时后端带回已注册账号的最新池状态
   // map results back onto file entries + auto-download
   S.results=res.results||[];
   S.results.forEach(r=>{

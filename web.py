@@ -115,20 +115,42 @@ def build_state() -> dict:
 
 
 def compute_plan(items: list[dict]) -> dict:
-    """items: [{name, duration}] -> allocation preview.
+    """items: [{id, name, duration}] -> allocation preview.
 
     ponytail: mirrors stt.allocate's best-fit but reads cached remaining only —
     a preview fires on every file add and must not network or write accounts.json.
     The authoritative allocation at transcribe time still uses stt.allocate.
+
+    Files longer than chunk_secs expand into their real silence-planned segments
+    (same _plan_one the transcribe path uses, silences cached per upload), so the
+    preview never shows a whole long file crammed into one negative virtual bin.
     """
     acfg = stt.accounts_config(CONFIG_PATH)
     margin, thr = acfg["selection_margin"], acfg["fresh_threshold"]
     fresh_cap = int(thr * margin)
+    chunk_secs = audio_split.default_chunk_secs(thr, stt.CREDITS_PER_SEC, margin)
     store = stt.load_accounts()
     accounts = [a for a in store["accounts"] if not a.get("invalid")]
 
     need = lambda req: None if req is None else int(req * margin) + 1
-    costs = [(it["name"], stt.estimate_required(it.get("duration"))) for it in items]
+    costs: list[tuple[str, int | None]] = []
+    finfo: list[dict] = []  # per input file: name + segCount / splitError
+    for it in items:
+        name, dur, uid = it["name"], it.get("duration"), it.get("id")
+        if dur is not None and dur > chunk_secs:
+            plan = _plan_one(uid, chunk_secs, audio_split.SILENCE_DB_DEFAULT,
+                             audio_split.SILENCE_MIN_DEFAULT) if uid else \
+                {"error": "缺少上传标识，无法切分"}
+            if plan.get("error"):
+                finfo.append({"name": name, "splitError": plan["error"]})
+                continue  # surfaced as an error row, never a negative bin
+            segs = plan["segments"]
+            finfo.append({"name": name, "segCount": len(segs)})
+            costs.extend((f"{name} · part{i:02d}", stt.estimate_required(e - s))
+                         for i, (s, e) in enumerate(segs))
+        else:
+            finfo.append({"name": name})
+            costs.append((name, stt.estimate_required(dur)))
     # largest need first; unknown-duration (None) sorts last (dedicated fresh bin)
     ordered = sorted(costs, key=lambda fc: (-1 if fc[1] is None else need(fc[1])),
                      reverse=True)
@@ -149,11 +171,15 @@ def compute_plan(items: list[dict]) -> dict:
         virtual.append(b); register_count += 1
         return b
 
+    oversize: list[str] = []
     for name, req in ordered:
         if req is None:
             b = open_virtual(0)
         else:
             n = need(req)
+            if n > fresh_cap:  # can't happen post-split; guard against negative bins
+                oversize.append(name)
+                continue
             cand = [b for b in bins if b.residual >= n]
             if cand:
                 b = min(cand, key=lambda b: b.residual)
@@ -172,7 +198,8 @@ def compute_plan(items: list[dict]) -> dict:
               "useSum": b.use, "remBefore": b.before, "remAfter": b.before - b.use,
               "isNew": b.is_new} for b in used]
     return {"alloc": alloc, "registerCount": register_count,
-            "totalNeed": total_need, "totalCredits": total_credits}
+            "totalNeed": total_need, "totalCredits": total_credits,
+            "files": finfo, "oversize": oversize}
 
 
 # ---------------------------------------------------------------- actions
@@ -286,9 +313,15 @@ def do_save_config(temp_email: dict, pool_target) -> dict:
     return build_state()
 
 
-def do_transcribe(upload_ids: list[str], params: dict) -> dict:
-    """Reuse stt.allocate + transcribe_one on the uploaded temp files."""
-    uploads = [_UPLOADS[i] for i in upload_ids if i in _UPLOADS]
+def do_transcribe(upload_ids: list[str], params: dict,
+                  confirm_register: bool = False) -> dict:
+    """Web version of stt._transcribe_split: silence-split long uploads into chunks,
+    allocate chunks + short files across accounts, register the user-confirmed
+    shortfall, transcribe each piece, then merge split files back into one subtitle.
+
+    Short uploads (duration <= chunk_secs) keep the original whole-file path.
+    """
+    uploads = [(i, _UPLOADS[i]) for i in upload_ids if i in _UPLOADS]
     if not uploads:
         return {"error": "没有可转录的文件"}
 
@@ -307,46 +340,138 @@ def do_transcribe(upload_ids: list[str], params: dict) -> dict:
     except ValueError as e:
         return {"error": str(e)}
 
+    acfg = stt.accounts_config(CONFIG_PATH)
+    chunk_secs = audio_split.default_chunk_secs(
+        acfg["fresh_threshold"], stt.CREDITS_PER_SEC, acfg["selection_margin"])
+    fmt = cfg["export_format"]
+    needs_split = any(u["duration"] and u["duration"] > chunk_secs for _, u in uploads)
+    if needs_split and fmt not in stt._MERGERS:  # backend guard; UI greys the button
+        return {"error": f"{fmt} 格式不支持长音频切分合并，请改用 SRT / VTT / TXT"}
+
     with _LOCK:
         store = stt.load_accounts()
-        acfg = stt.accounts_config(CONFIG_PATH)
         accounts = [a for a in store["accounts"] if not a.get("invalid")]
         for a in accounts:
             stt.account_remaining(a, store)          # accurate remaining
         stt.save_accounts(store)
 
-        costs = [(u["path"], stt.estimate_required(u["duration"])) for u in uploads]
+        # --- plan & cut: expand long uploads into chunk entries ------------
+        parents: list[dict] = []
+        entries: list[dict] = []
+        for uid, up in uploads:
+            name = up["name"]
+            stem = pathlib.Path(name).stem
+            dur = up["duration"]
+            p = {"name": name, "split": False, "entries": [], "error": None,
+                 "final": f"{stem}.{fmt}"}
+            parents.append(p)
+            if dur is not None and dur > chunk_secs:
+                sp = _plan_one(uid, chunk_secs, audio_split.SILENCE_DB_DEFAULT,
+                               audio_split.SILENCE_MIN_DEFAULT)
+                if sp.get("error"):
+                    p["error"] = sp["error"]
+                    continue
+                segs = [(s, e) for s, e in sp["segments"]]
+                try:
+                    chunks = audio_split.cut_segments(
+                        up["path"], segs, _UPLOAD_DIR / f"{uid}-chunks",
+                        sp["hard"], stem=stem)
+                except Exception as e:  # cut failed: skip this file, keep others
+                    p["error"] = repr(e)
+                    continue
+                p["split"] = True
+                for ch in chunks:
+                    s, e = segs[ch.index]
+                    entry = {"parent": p, "input": ch.path, "start": ch.start,
+                             "dur": e - s, "output": ch.path.with_suffix(f".{fmt}"),
+                             "ok": None}
+                    p["entries"].append(entry)
+                    entries.append(entry)
+            else:
+                entry = {"parent": p, "input": up["path"], "start": 0.0,
+                         "dur": dur, "output": None, "ok": None}
+                p["entries"].append(entry)
+                entries.append(entry)
+
+        if not entries:
+            errs = "；".join(f"{p['name']}: {p['error']}" for p in parents if p["error"])
+            return {"error": errs or "没有可转录的文件"}
+
+        # --- allocate all pieces across accounts ---------------------------
+        costs = [(e["input"], stt.estimate_required(e["dur"])) for e in entries]
         try:
             plan, register_count = stt.allocate(
                 costs, accounts, acfg["selection_margin"], acfg["fresh_threshold"], store)
         except SystemExit as e:
             return {"error": str(e)}
-        if register_count:
-            return {"error": f"当前账号池不足,还需 {register_count} 个新账号。"
-                             f"请先在命令行运行 `python stt.py pool warm` 预热账号池后重试。"}
 
-        results = []
+        # --- register the confirmed shortfall (mirrors _transcribe_split) --
+        new_accounts: list[dict] = []
+        if register_count:
+            if not confirm_register:  # UI confirms first; stale previews bounce here
+                return {"needRegister": register_count}
+            if not stt.has_temp_email_config(CONFIG_PATH):
+                return {"error": f"当前账号池不足，还需 {register_count} 个新账号，"
+                                 f"但 [temp_email] 未配置。请先在「启动注册机」中完成配置。"}
+            try:
+                for _ in range(register_count):
+                    acct = stt.register_one()
+                    stt.upsert_account(store, acct)
+                    new_accounts.append(acct)
+            except (Exception, SystemExit) as e:  # keep already-registered accounts
+                stt.save_accounts(store)
+                return {"error": f"注册新账号失败：{e!r}", "state": build_state()}
+            stt.save_accounts(store)
+        resolved = [(inp, new_accounts[int(t.split("#")[1])] if isinstance(t, str) else t)
+                    for inp, t in plan]
+        entry_by_input = {e["input"]: e for e in entries}
+
+        # --- transcribe each piece -----------------------------------------
         used = []
-        for audio, account in plan:                  # plan targets are real accounts here
+        for inp, account in resolved:
+            entry = entry_by_input[inp]
             email = account.get("email")
             store["active"] = email
             stt.save_accounts(store)
             if account not in used:
                 used.append(account)
             try:
-                out = stt.transcribe_one(audio, cfg, account, store, CONFIG_PATH)
-                data = out.read_bytes()
-                results.append({
-                    "name": audio.name, "ok": True, "email": email,
-                    "download": out.name,
-                    "content": base64.b64encode(data).decode("ascii"),
-                })
+                out = stt.transcribe_one(
+                    inp, cfg, account, store, CONFIG_PATH,
+                    output=str(entry["output"]) if entry["output"] else None)
+                entry.update(ok=True, out=out, email=email)
             except Exception as e:  # skip & continue, like cmd_transcribe
-                results.append({"name": audio.name, "ok": False,
-                                "email": email, "error": repr(e)})
+                entry.update(ok=False, err=repr(e), email=email)
         for a in used:
             stt.account_remaining(a, store, force=True)
         stt.save_accounts(store)
+
+    # --- merge per parent, or report failure (mirrors _transcribe_split R8) ---
+    results = []
+    for p in parents:
+        if p["error"]:
+            results.append({"name": p["name"], "ok": False, "error": p["error"]})
+            continue
+        ents = p["entries"]
+        emails = ", ".join(dict.fromkeys(e.get("email") or "?" for e in ents))
+        bad = [i for i, e in enumerate(ents) if not e["ok"]]
+        if bad:
+            err = ents[bad[0]].get("err", "未执行")
+            prefix = f"分段 {', '.join(f'part{i:02d}' for i in bad)} 失败：" if p["split"] else ""
+            results.append({"name": p["name"], "ok": False, "email": emails,
+                            "error": prefix + err})
+            continue
+        if p["split"]:
+            merged = stt._MERGERS[fmt](
+                [(e["start"], pathlib.Path(e["out"]).read_text(encoding="utf-8"))
+                 for e in sorted(ents, key=lambda e: e["start"])])
+            data, download = merged.encode("utf-8"), p["final"]
+        else:
+            out = ents[0]["out"]
+            data, download = out.read_bytes(), out.name
+        results.append({"name": p["name"], "ok": True, "email": emails,
+                        "download": download,
+                        "content": base64.b64encode(data).decode("ascii")})
 
     return {"results": results, "state": build_state()}
 
@@ -518,7 +643,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/transcribe":
                 body = self._read_json()
                 self._send_json(do_transcribe(body.get("uploads", []),
-                                              body.get("params", {})))
+                                              body.get("params", {}),
+                                              bool(body.get("confirmRegister"))))
                 return
             if path == "/api/split/plan":
                 self._send_json(do_split_plan(self._read_json()))
