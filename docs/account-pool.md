@@ -44,6 +44,12 @@ python stt.py accounts
 # 强制从 API 刷新额度
 python stt.py accounts --refresh
 
+# 只刷新指定账号（可重复 -e 指定多个）；其余账号不发网络请求
+python stt.py accounts --refresh -e a@example.com -e b@example.com
+
+# 不带 --refresh 时，--email 只按邮箱过滤列表（用缓存额度，不联网）
+python stt.py accounts -e a@example.com
+
 # 查看 fresh / usable / depleted 数量
 python stt.py pool status
 

@@ -44,6 +44,12 @@ python stt.py accounts
 # Force-refresh remaining credits from the API
 python stt.py accounts --refresh
 
+# Refresh only specific account(s) (repeat -e for several); others get no network call
+python stt.py accounts --refresh -e a@example.com -e b@example.com
+
+# Without --refresh, --email just filters the listing by email (cached credits, no network)
+python stt.py accounts -e a@example.com
+
 # Show pool counts
 python stt.py pool status
 
