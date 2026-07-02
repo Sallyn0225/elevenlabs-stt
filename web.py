@@ -227,6 +227,38 @@ def do_delete(emails: list[str]) -> dict:
         return build_state()
 
 
+def do_export(emails: list[str]) -> dict:
+    """Full raw records (incl. refreshToken/jwt) for the selected emails, so the
+    downloaded file is importable on another machine — the UI's masked view isn't."""
+    with _LOCK:
+        store = stt.load_accounts()
+        wanted = set(emails)
+        return {"accounts": [a for a in store["accounts"]
+                             if a.get("email") in wanted]}
+
+
+def do_import(accounts: list) -> dict:
+    """Merge records into accounts.json by email: new → append, duplicate or
+    malformed (no dict / no '@' email) → skip. Never overwrites existing entries."""
+    with _LOCK:
+        store = stt.load_accounts()
+        existing = {a.get("email") for a in store["accounts"]}
+        added = skipped = 0
+        for rec in accounts:
+            email = rec.get("email") if isinstance(rec, dict) else None
+            if not isinstance(email, str) or "@" not in email or email in existing:
+                skipped += 1
+                continue
+            store["accounts"].append(rec)
+            existing.add(email)
+            added += 1
+        if added:
+            stt.save_accounts(store)
+        state = build_state()
+        state.update(imported=added, skipped=skipped)
+        return state
+
+
 def do_login(email: str, password: str) -> dict:
     """Log in with email+password via ElevenLabs' Firebase REST endpoint (no browser),
     fetch credits, and save the account — the design's in-modal login.
@@ -676,6 +708,17 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(do_register(target))
                 except SystemExit as e:      # temp_email/deps missing, etc.
                     self._send_json({"error": str(e)})
+                return
+            if path == "/api/accounts/export":
+                self._send_json(do_export(self._read_json().get("emails", [])))
+                return
+            if path == "/api/accounts/import":
+                body = self._read_json()
+                accounts = body.get("accounts") if isinstance(body, dict) else body
+                if not isinstance(accounts, list):
+                    self._send_json({"error": "文件格式无效：应为账号数组或 {\"accounts\": [...]}"})
+                    return
+                self._send_json(do_import(accounts))
                 return
             if path == "/api/accounts/refresh":
                 self._send_json(do_refresh(self._read_json().get("emails", [])))
