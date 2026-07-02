@@ -601,7 +601,9 @@ def register_one() -> dict[str, Any]:
             "https://elevenlabs.io/app/sign-up",
         ])
         new_window = None
-        deadline = time.time() + 10
+        # 30s: a brand-new profile cold-starts slowly (profile init + AV scan); 10s
+        # missed the window on busy machines and the finally-block killed late Chrome.
+        deadline = time.time() + 30
         while time.time() < deadline and new_window is None:
             time.sleep(0.5)
             for w in gw.getAllWindows():
