@@ -11,6 +11,7 @@ config.toml
 _tmp-sample.m4a
 out.srt
 out.vtt
+out/
 webui*.log
 webui.pid
 .playwright-mcp/

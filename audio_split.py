@@ -150,16 +150,27 @@ def detect_silences(path: pathlib.Path, noise_db: float,
 
 def cut_segments(path: pathlib.Path, segments: list[tuple[float, float]],
                  workdir: pathlib.Path,
-                 hard_flags: list[bool] | None = None) -> list[Chunk]:
+                 hard_flags: list[bool] | None = None,
+                 stem: str | None = None) -> list[Chunk]:
     """Losslessly slice `path` into segments via ffmpeg -c copy. Returns Chunk list.
 
     tradeoff: -c copy is fast and lossless but can only cut on keyframes; since cuts
     land inside detected silence (and audio keyframes are dense) the drift is inaudible.
+
+    `stem` overrides the output filename stem (part files are `<stem>.partNN<ext>`);
+    defaults to `path.stem`. The web layer passes the original name here because its
+    uploads are stored under a uuid-prefixed temp filename.
     """
     ffmpeg = _require("ffmpeg")
     workdir = pathlib.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    stem, suffix = path.stem, path.suffix
+    stem, suffix = (stem or path.stem), path.suffix
+    # 清残留:重切段数变少时,旧的高序号 partNN 会冒充新产物。用 regex 而非 glob,
+    # 否则 stem 里的 [ ] 等 glob 元字符会漏删/误删别的文件。
+    stale = re.compile(re.escape(stem) + r"\.part\d{2}" + re.escape(suffix))
+    for old in workdir.iterdir():
+        if stale.fullmatch(old.name):
+            old.unlink()
     chunks: list[Chunk] = []
     for i, (start, end) in enumerate(segments):
         out = workdir / f"{stem}.part{i:02d}{suffix}"

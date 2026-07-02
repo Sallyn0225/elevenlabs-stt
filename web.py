@@ -22,6 +22,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import audio_split
 import stt
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -103,6 +104,10 @@ def build_state() -> dict:
         "margin": acfg["selection_margin"],
         "freshThreshold": acfg["fresh_threshold"],
         "cps": stt.CREDITS_PER_SEC,
+        # default chunk length for the 长音频切分 tool: largest span a single fresh
+        # account can transcribe within margin (audio_split derives it).
+        "chunkSecs": audio_split.default_chunk_secs(
+            acfg["fresh_threshold"], stt.CREDITS_PER_SEC, acfg["selection_margin"]),
         # temp_email/[accounts] config for the 启动注册机 modal (local single-user tool,
         # so exposing the backend secrets to the localhost UI matches accounts.json).
         "tempEmail": stt.temp_email_config(CONFIG_PATH),
@@ -346,6 +351,104 @@ def do_transcribe(upload_ids: list[str], params: dict) -> dict:
     return {"results": results, "state": build_state()}
 
 
+# ------------------------------------------------------- 长音频切分 (local)
+
+def _split_params(body: dict) -> tuple[int, float, float]:
+    """Resolve (chunk_secs, silence_db, silence_min) from a request, filling defaults.
+
+    chunk_secs defaults to the account-derived value and is clamped to [30, 1800]
+    (matches the UI stepper); bad/blank values fall back to the default.
+    """
+    acfg = stt.accounts_config(CONFIG_PATH)
+    default_chunk = audio_split.default_chunk_secs(
+        acfg["fresh_threshold"], stt.CREDITS_PER_SEC, acfg["selection_margin"])
+    raw = body.get("chunk_secs")
+    try:
+        chunk = int(raw) if raw not in (None, "") else default_chunk
+    except (TypeError, ValueError):
+        chunk = default_chunk
+    chunk = max(30, min(1800, chunk))
+
+    def _num(key, default):
+        try:
+            return float(body[key])
+        except (KeyError, TypeError, ValueError):
+            return default
+
+    return chunk, _num("silence_db", audio_split.SILENCE_DB_DEFAULT), \
+        _num("silence_min", audio_split.SILENCE_MIN_DEFAULT)
+
+
+def _plan_one(uid: str, chunk_secs: int, silence_db: float, silence_min: float) -> dict:
+    """Compute one file's greedy split plan against the real ffmpeg silence detection.
+
+    duration <= chunk_secs short-circuits to a single segment (no decode, same
+    semantics as stt's _transcribe_split). Silence results are cached per
+    (db, min) on the upload entry so re-planning after a chunk_secs change is free.
+    """
+    up = _UPLOADS.get(uid)
+    if not up:
+        return {"id": uid, "name": uid, "error": "上传已失效,请重新上传"}
+    name, duration = up["name"], up.get("duration")
+    base = {"id": uid, "name": name, "duration": duration}
+    if duration is None:
+        return {**base, "error": "无法确定音频时长"}
+    if duration <= chunk_secs:
+        return {**base, "segments": [[0.0, duration]], "hard": [False]}
+    cache = up.setdefault("silences", {})
+    key = (silence_db, silence_min)
+    if key not in cache:
+        try:
+            cache[key] = audio_split.detect_silences(up["path"], silence_db, silence_min)
+        except Exception as e:  # ffmpeg missing / decode failure → surface, don't 500
+            return {**base, "error": repr(e)}
+    mids = [(s + e) / 2 for s, e in cache[key]]
+    segs, hard = audio_split.plan_cuts(duration, chunk_secs, mids)
+    return {**base, "segments": [[s, e] for s, e in segs], "hard": hard}
+
+
+def do_split_plan(body: dict) -> dict:
+    chunk, db, smin = _split_params(body)
+    return {"files": [_plan_one(uid, chunk, db, smin)
+                      for uid in body.get("uploads", [])]}
+
+
+def do_split_run(body: dict) -> dict:
+    """Slice each upload into its planned segments under output_dir/<stem>-chunks/.
+
+    output_dir is resolved relative to the project root (HERE), default 'out'.
+    Per-file failures are recorded and skipped, matching the CLI's tolerance.
+    """
+    chunk, db, smin = _split_params(body)
+    out_base = (body.get("output_dir") or "").strip() or "out"
+    base_dir = HERE / out_base
+    results = []
+    for uid in body.get("uploads", []):
+        up = _UPLOADS.get(uid)
+        if not up:
+            results.append({"name": uid, "ok": False, "error": "上传已失效"})
+            continue
+        name = up["name"]
+        stem = pathlib.Path(name).stem
+        rel_out = f"{out_base}/{stem}-chunks"
+        plan = _plan_one(uid, chunk, db, smin)
+        if plan.get("error"):
+            results.append({"name": name, "ok": False, "error": plan["error"],
+                            "outDir": rel_out})
+            continue
+        segs = [(s, e) for s, e in plan["segments"]]
+        try:
+            chunks = audio_split.cut_segments(
+                up["path"], segs, base_dir / f"{stem}-chunks",
+                plan["hard"], stem=stem)
+            results.append({"name": name, "ok": True, "segCount": len(chunks),
+                            "outDir": rel_out})
+        except Exception as e:  # ffmpeg failure on this file → skip, continue
+            results.append({"name": name, "ok": False, "error": repr(e),
+                            "outDir": rel_out})
+    return {"results": results}
+
+
 # ------------------------------------------------------------------ server
 
 class Handler(BaseHTTPRequestHandler):
@@ -416,6 +519,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 self._send_json(do_transcribe(body.get("uploads", []),
                                               body.get("params", {})))
+                return
+            if path == "/api/split/plan":
+                self._send_json(do_split_plan(self._read_json()))
+                return
+            if path == "/api/split/run":
+                self._send_json(do_split_run(self._read_json()))
                 return
             if path == "/api/accounts/login":
                 body = self._read_json()
