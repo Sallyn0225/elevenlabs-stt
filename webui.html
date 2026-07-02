@@ -110,16 +110,23 @@ function fileRowHTML(f,i){
   </div>`;
 }
 
-function langDropdownHTML(){
-  if(!S.langOpen) return '';
+// 根据当前 S.langQuery 过滤并生成语言下拉的选项行 html。
+// 抽出为独立函数,供 langDropdownHTML 首次渲染与 langQuery 输入时的局部更新复用。
+function langRowsHTML(){
   const opts=[{name:'自动检测',code:'auto'},...(S.data?S.data.languages:[])];
   const q=S.langQuery.trim().toLowerCase();
   const shown=opts.filter(o=>!q||o.name.toLowerCase().includes(q)||o.code.includes(q)).slice(0,60);
-  const rows=shown.map(o=>{const on=S.params.language===o.code;
+  return shown.map(o=>{const on=S.params.language===o.code;
     return `<div data-act="pickLang" data-code="${esc(o.code)}" data-name="${esc(o.name)}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;font-size:13.5px;cursor:pointer;${on?'background:var(--muted)':''}">${esc(o.name)} ${o.code!=='auto'?'· <span class="mono" style="color:var(--mut-fg);font-size:11px">'+esc(o.code)+'</span>':''}${on?'<span style="color:var(--green)">✓</span>':''}</div>`;}).join('');
+}
+
+function langDropdownHTML(){
+  if(!S.langOpen) return '';
+  // 选项行包在 [data-lang-rows] 容器里,langQuery 输入时只重建该容器的 innerHTML,
+  // 搜索框本身不被销毁,焦点/光标自然保留、零闪烁(不再全量 render + refocus)。
   return `<div style="position:absolute;top:74px;left:0;right:0;z-index:10;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.12);padding:6px;animation:fadein .12s ease;max-height:320px;overflow:auto">
     <input data-input="langQuery" value="${esc(S.langQuery)}" placeholder="搜索 ${(S.data?S.data.languages.length:157)} 种语言…" style="width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:4px;border:none;border-bottom:1px solid var(--border);outline:none;background:transparent;color:var(--fg);font-size:13px"/>
-    ${rows}
+    <div data-lang-rows>${langRowsHTML()}</div>
     <div style="padding:9px 10px 4px;font-size:11px;color:var(--mut-fg);border-top:1px solid var(--border);margin-top:4px">支持 ISO 639-3 代码,或输入 auto 自动检测</div>
   </div>`;
 }
@@ -599,7 +606,7 @@ document.addEventListener('input',e=>{
   else if(k==='query'){S.query=el.value;S.selected=[];S.page=1;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="query"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
   else if(k.startsWith('login.')){if(S.login)S.login[k.slice(6)]=el.value;} // no render → keep focus
   else if(k.startsWith('reg.')){if(S.reg)S.reg[k.slice(4)]=el.value;}   // no render → keep focus
-  else if(k==='langQuery'){S.langQuery=el.value;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="langQuery"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
+  else if(k==='langQuery'){S.langQuery=el.value;const rows=document.querySelector('[data-lang-rows]');if(rows)rows.innerHTML=langRowsHTML();else render();} // 局部更新选项行,输入框不重建 → 焦点保留、零闪烁;拿不到容器时兜底走全量 render
   else if(k==='keyterm'){S.keyterm=el.value;}
 });
 
@@ -631,7 +638,7 @@ document.addEventListener('drop',e=>{
 });
 document.addEventListener('keydown',e=>{
   const el=e.target.closest('[data-enter]'); if(!el||e.key!=='Enter')return;
-  if(el.dataset.enter==='addTerm'){const v=S.keyterm.trim();if(v&&!S.params.vocab.includes(v))S.params.vocab.push(v);S.keyterm='';render();}
+  if(el.dataset.enter==='addTerm'){const v=S.keyterm.trim();if(v&&!S.params.vocab.includes(v))S.params.vocab.push(v);S.keyterm='';render();const n=document.querySelector('[data-input="keyterm"]');if(n)n.focus();} // render 后把焦点还给 keyterm 输入框,可直接继续输入下一个词
   else if(el.dataset.enter==='submitLogin'){if(S.busy!=='login')runLogin();}
 });
 
