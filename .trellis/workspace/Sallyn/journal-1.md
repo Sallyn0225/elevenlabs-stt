@@ -106,3 +106,36 @@ Fixed WebUI first-render positional jitter by making entrance animations opacity
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: CLI selective account credit refresh
+
+**Date**: 2026-07-02
+**Task**: CLI selective account credit refresh
+**Branch**: `main`
+
+### Summary
+
+Added repeatable -e/--email to 'stt accounts' so CLI can refresh/list specific account(s) by email, matching WebUI's selective refresh. Single-file ~9-line change in stt.py: wanted=set(args.email) filters both --refresh scope (no network for non-matches) and the listing; unmatched --email with --refresh emits one stderr line each. Backward-compatible when --email absent. selfcheck + manual behavior checks pass.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `84499b6` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
