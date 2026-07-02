@@ -730,9 +730,8 @@ def register_one() -> dict[str, Any]:
             pyperclip.copy(text)
             pyautogui.hotkey("ctrl", "v")
 
-        hotkey("ctrl", "l")
-        paste("https://elevenlabs.io/app/sign-up")
-        press("enter")
+        # Chrome already opened /app/sign-up from its command line; just wait
+        # for the app to render instead of re-navigating (visible reload).
         time.sleep(12)
 
         click_frac(0.50, 0.56)  # signup email
