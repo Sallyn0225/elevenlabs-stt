@@ -73,3 +73,36 @@ Added multi-file batch mode to stt transcribe: pre-compute per-file credits, bin
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Fix WebUI entrance jitter
+
+**Date**: 2026-07-02
+**Task**: Fix WebUI entrance jitter
+**Branch**: `main`
+
+### Summary
+
+Fixed WebUI first-render positional jitter by making entrance animations opacity-only, added webui*.log ignore coverage, documented the frontend animation convention, validated selfcheck and local /api/state, committed and pushed the fix.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7e4f73a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
