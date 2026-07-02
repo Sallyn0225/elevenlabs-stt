@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
@@ -1400,13 +1401,14 @@ def cmd_accounts(args: argparse.Namespace) -> int:
         print("no accounts. run `stt login` or (once configured) `stt pool warm`.")
         return 0
     if args.refresh:
-        for a in accts:
-            if a.get("invalid"):
-                continue
-            if wanted and a.get("email") not in wanted:
-                continue
-            rem = account_remaining(a, store, force=True)
+        targets = [a for a in accts
+                   if not a.get("invalid") and (not wanted or a.get("email") in wanted)]
+        # parallel fetch, no per-thread saves; single save_accounts below (same pattern as web.do_refresh)
+        def _one(a):
+            rem = account_remaining(a, store, force=True, save=lambda _s: None)
             print(f"  refreshed {a.get('email')}: rem={rem}", file=sys.stderr)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_one, targets))
         if wanted:
             known = {a.get("email") for a in accts}
             for e in sorted(wanted - known):
