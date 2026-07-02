@@ -253,7 +253,7 @@ function transcribeView(){
   return `<main style="max-width:1024px;margin:0 auto;padding:34px 24px 132px;display:flex;flex-direction:column;gap:26px">
     <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">上传音频,生成字幕</h1>
       <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">支持单个或批量上传 · 按额度自动分配账号 · 完成后自动下载字幕文件</p></div>
-    <label style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
+    <label data-drop="pickFiles" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
       <input type="file" multiple accept="audio/*" data-input="pickFiles" style="display:none"/>
       <div style="width:46px;height:46px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;border:1px solid var(--border);color:var(--fg)"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></div>
       <div><div style="font-size:15px;font-weight:600">拖拽音频文件到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
@@ -601,6 +601,33 @@ document.addEventListener('input',e=>{
   else if(k.startsWith('reg.')){if(S.reg)S.reg[k.slice(4)]=el.value;}   // no render → keep focus
   else if(k==='langQuery'){S.langQuery=el.value;const pos=el.selectionStart;render();const n=document.querySelector('[data-input="langQuery"]');if(n){n.focus();n.setSelectionRange(pos,pos);}}
   else if(k==='keyterm'){S.keyterm=el.value;}
+});
+
+// 拖放上传：委托风格，drop 区用 [data-drop] 标识，复用 addFiles()。
+// 高亮直接改当前 label 的 style（只变色不改尺寸/边框宽度/padding,避免布局抖动;
+// label 虽由 render() 模板重渲染,但拖放交互期间不会触发 render(),故直接操作 style 可靠且无需持久 class）。
+// dragleave 在子元素间冒泡会误触发,用计数器 dropDepth 避免高亮闪烁。
+let dropDepth=0;
+function setDropHi(el,on){el.style.borderColor=on?'var(--accent)':'var(--border)';el.style.background=on?'var(--muted)':'var(--muted2)';}
+// 拖拽事件的 target 在部分浏览器（如 Firefox 悬停在文本内容上时）可能是文本节点,
+// 文本节点没有 closest(),直接调用会抛错并导致高亮残留/失效,故先归一到元素节点。
+function dropZone(t){ if(t&&t.nodeType===3)t=t.parentElement; return t&&t.closest?t.closest('[data-drop]'):null; }
+document.addEventListener('dragenter',e=>{
+  const el=dropZone(e.target); if(!el)return;
+  e.preventDefault(); dropDepth++; setDropHi(el,true);
+});
+document.addEventListener('dragleave',e=>{
+  const el=dropZone(e.target); if(!el)return;
+  dropDepth=Math.max(0,dropDepth-1); if(dropDepth===0)setDropHi(el,false);
+});
+document.addEventListener('dragover',e=>{
+  e.preventDefault(); // 全局兜底：阻止浏览器把文件当 URL 打开
+  const el=dropZone(e.target); if(el&&e.dataTransfer)e.dataTransfer.dropEffect='copy';
+});
+document.addEventListener('drop',e=>{
+  e.preventDefault(); // 全局兜底
+  const el=dropZone(e.target); dropDepth=0;
+  if(el){setDropHi(el,false); if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files.length)addFiles(e.dataTransfer.files);}
 });
 document.addEventListener('keydown',e=>{
   const el=e.target.closest('[data-enter]'); if(!el||e.key!=='Enter')return;
