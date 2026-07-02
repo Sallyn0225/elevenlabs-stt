@@ -94,7 +94,7 @@ python web.py            # 打开 http://127.0.0.1:8756
 stt login              一次性浏览器登录 → session.json
 stt transcribe <audio> [<audio> ...]  转录一个或多个音频文件（批量）
 stt accounts           查看账号与剩余额度
-stt pool status        查看 fresh/usable/depleted 账号数量
+stt pool status        查看 fresh/usable/depleted/invalid 账号数量
 stt pool warm          注册账号直到达到 fresh 目标
 stt list-languages     打印支持的语言名 + 代码
 stt selfcheck          离线自检（不联网）
@@ -116,6 +116,14 @@ stt selfcheck          离线自检（不联网）
 | `--show-cost` | 打印预估积分成本 |
 | `--poll-timeout` | 轮询超时秒数 |
 | `--dry-run` | 只打印分配计划后退出，不注册账号也不上传 |
+
+`accounts` 参数：
+
+| 参数 | 说明 |
+|---|---|
+| `-c, --config` | 配置文件路径（默认 `config.toml`） |
+| `--refresh` | 强制从 API 刷新额度 |
+| `-e, --email` | 只作用于该账号（可重复）；同时过滤 `--refresh` 范围与列表显示 |
 
 ## 语言
 
