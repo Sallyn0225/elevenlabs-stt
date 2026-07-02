@@ -49,6 +49,9 @@ python stt.py transcribe a.mp3 b.mp3 c.mp3 --dry-run
 # 5) 指定语言 + 词汇 + 导出 VTT
 python stt.py transcribe audio.m4a --lang eng --vocab "V社,Major" --format vtt -o out.vtt
 
+# 6) 超长音频：按静音智能切分，逐段转录后合并回一份字幕
+python stt.py transcribe long.m4a --split -o long.srt
+
 # 可选：查看/预热多账号额度池
 python stt.py pool status
 python stt.py pool warm --target 3
@@ -116,6 +119,11 @@ stt selfcheck          离线自检（不联网）
 | `--show-cost` | 打印预估积分成本 |
 | `--poll-timeout` | 轮询超时秒数 |
 | `--dry-run` | 只打印分配计划后退出，不注册账号也不上传 |
+| `--split` | 按静音把超长音频切成配额内的片段，逐段转录后合并回一份字幕（仅 `srt`/`vtt`/`txt`） |
+| `--chunk-secs` | 每段目标时长上限（秒）；默认由额度自动推导（约 569s） |
+| `--keep-chunks` | 合并成功后保留临时片段文件（默认清理） |
+| `--silence-db` | 静音判定阈值（dB，默认 `-30`） |
+| `--silence-min` | 最短静音时长（秒，默认 `0.5`） |
 
 `accounts` 参数：
 
@@ -146,10 +154,37 @@ stt selfcheck          离线自检（不联网）
 
 `-o/--output` 只在单文件时可用；批量时每个文件默认输出到各自的 `<名字>.<格式>`。
 
+## 超长音频按静音切分（`--split`）
+
+单个免费账号约只够转录 10 分钟。对更长的音频加 `--split`，脚本会：
+
+- 用 ffmpeg `silencedetect` 检测静音区间，在每段目标时长上限内**选最靠后的静音中点**切开（切点落在静音处，不切断词）；窗口内没有静音则在上限处硬切并告警；
+- 片段目标时长默认由额度自动推导（`fresh_threshold / (积分每秒 × selection_margin) × 0.95`，约 569s ≈ 9.5 分钟），保证每段能被一个满额账号装下；可用 `--chunk-secs` 覆盖；
+- 把切出的片段当作普通文件汇入既有的**多账号分配 + 逐段转录**流程（每段各占一个够用的账号，缺口自动注册补齐）；
+- 全部片段成功后，按每段起始偏移**校正时间戳并合并**成一份 `<名字>.<格式>`（`srt`/`vtt` 重排序号、`txt` 顺序拼接），随后清理临时片段（`--keep-chunks` 保留）。
+
+```bash
+# 1 小时音频 → 自动切成约 7 段，分配到账号池转录，合并为一份 srt
+python stt.py transcribe interview.m4a --split -o interview.srt
+
+# 先看切分与分配计划，不上传
+python stt.py transcribe interview.m4a --split --dry-run
+
+# 自定义片段上限与静音灵敏度
+python stt.py transcribe interview.m4a --split --chunk-secs 480 --silence-db -35 --silence-min 0.8
+```
+
+约束与行为：
+
+- 仅支持合并 `srt`/`vtt`/`txt`；搭配 `json`/`html`/`pdf`/`docx` 会直接报错。
+- **失败即不合并**:任一片段转录失败时不生成合并文件，但保留已成功片段的输出与切出的片段文件，汇总里标明失败段（退出码非零），便于手动重跑。
+- 临时片段写在 `out/<名字>-chunks/`；需要 ffmpeg/ffprobe 可用。
+- 用 `-c copy` 无损切割,切点毫秒级对齐关键帧(落在静音内,无感)。
+
 ## 限制
 
 - **文件大小**：1000 MB 硬限制，超出在上传前拒绝。
-- **时长**：超过 10 分钟（免费账号软限制）时，若 `ffprobe` 可用则提醒，不强制阻止。
+- **时长**：超过 10 分钟（免费账号软限制）时，若 `ffprobe` 可用则提醒，不强制阻止；超长音频可用 `--split` 自动按静音切分再合并。
 - **积分**：免费约 1 万积分（≈13.9 积分/秒，≈12 分钟/月）。不足时服务端拒绝上传，CLI 显示错误；`--show-cost` 可在上传前打印预估。
 
 > [!NOTE]

@@ -1,0 +1,3 @@
+{"file": "docs/api-contract.md", "reason": "STT 导出接口(export/{fmt})契约与 srt/vtt/txt/json 产物形状,合并逻辑需据此理解各格式"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "新增模块前须先复用 stt.py 已有 audio_duration/allocate/transcribe_one,避免重复实现"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "切分片段作为新数据流经 allocate→transcribe→merge 多层,需按跨层指南校验 offset/字段传递"}

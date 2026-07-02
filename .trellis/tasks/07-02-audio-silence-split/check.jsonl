@@ -1,0 +1,3 @@
+{"file": "docs/api-contract.md", "reason": "校验合并产出的 srt/vtt/txt 是否符合导出格式契约与时间戳格式"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查 offset 在 split→transcribe→merge 各层是否一致、无丢段/时间戳错位"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端代码质量与禁用模式核对"}

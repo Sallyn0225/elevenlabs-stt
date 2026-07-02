@@ -49,6 +49,9 @@ python stt.py transcribe a.mp3 b.mp3 c.mp3 --dry-run
 # 5) Force language + vocab + export VTT
 python stt.py transcribe audio.m4a --lang eng --vocab "V社,Major" --format vtt -o out.vtt
 
+# 6) Long audio: split on silence, transcribe each part, merge back into one file
+python stt.py transcribe long.m4a --split -o long.srt
+
 # Optional: inspect/warm the multi-account pool
 python stt.py pool status
 python stt.py pool warm --target 3
@@ -116,6 +119,11 @@ stt selfcheck          offline self-check (no network)
 | `--show-cost` | Print estimated credit cost |
 | `--poll-timeout` | Poll timeout in seconds |
 | `--dry-run` | Print the allocation plan and exit — no registration, no upload |
+| `--split` | Split over-long audio on silence into quota-sized parts, transcribe each, merge back into one file (`srt`/`vtt`/`txt` only) |
+| `--chunk-secs` | Per-part target duration cap (seconds); default auto-derived from quota (~569s) |
+| `--keep-chunks` | Keep temporary part files after a successful merge (cleaned up by default) |
+| `--silence-db` | Silence threshold (dB, default `-30`) |
+| `--silence-min` | Minimum silence duration (seconds, default `0.5`) |
 
 `accounts` flags:
 
@@ -146,10 +154,37 @@ With `[temp_email]` and `[accounts]` configured, the script can maintain multipl
 
 `-o/--output` is single-file only; in a batch each file defaults to its own `<name>.<fmt>`.
 
+## Splitting long audio on silence (`--split`)
+
+A single free account only covers ~10 minutes. For longer audio, add `--split` and the script will:
+
+- detect silences with ffmpeg `silencedetect` and cut at the **latest silence midpoint** within each per-part duration cap (cuts land inside silence, never mid-word); if a window has no silence it hard-cuts at the cap and warns;
+- default the per-part cap from your quota (`fresh_threshold / (credits_per_sec × selection_margin) × 0.95`, ≈569s ≈ 9.5 min) so each part fits one full account; override with `--chunk-secs`;
+- feed the parts as ordinary files into the existing **multi-account allocation + per-part transcription** flow (each part takes a sufficient account, registering the shortfall automatically);
+- once all parts succeed, **offset-correct the timestamps and merge** into one `<name>.<fmt>` (`srt`/`vtt` renumbered, `txt` concatenated in order), then clean up the temporary parts (`--keep-chunks` keeps them).
+
+```bash
+# a 1-hour file → ~7 parts, allocated across the pool, merged into one srt
+python stt.py transcribe interview.m4a --split -o interview.srt
+
+# preview the split + allocation plan without uploading
+python stt.py transcribe interview.m4a --split --dry-run
+
+# tune the per-part cap and silence sensitivity
+python stt.py transcribe interview.m4a --split --chunk-secs 480 --silence-db -35 --silence-min 0.8
+```
+
+Constraints & behavior:
+
+- Merge is supported only for `srt`/`vtt`/`txt`; combining with `json`/`html`/`pdf`/`docx` errors out.
+- **Fail = no merge**: if any part fails, no merged file is written, but the successful parts' outputs and the cut part files are kept, and the summary flags the failed part (non-zero exit) for a manual re-run.
+- Temporary parts live in `out/<name>-chunks/`; requires ffmpeg/ffprobe.
+- Cuts use `-c copy` (lossless), snapping to the nearest keyframe at millisecond scale (inside silence, imperceptible).
+
 ## Limits
 
 - **File size**: 1000 MB hard limit; rejected before upload.
-- **Duration**: if `ffprobe` is installed, audio longer than 10 min (free-account soft limit) triggers a warning; not hard-blocked.
+- **Duration**: if `ffprobe` is installed, audio longer than 10 min (free-account soft limit) triggers a warning; not hard-blocked. Over-long audio can use `--split` to auto-split on silence and merge back.
 - **Credits**: free tier ~10,000 credits (~13.9 cr/s, ≈12 min/month). If insufficient, the server rejects the upload and the CLI shows the error; `--show-cost` prints a pre-upload estimate.
 
 > [!NOTE]
