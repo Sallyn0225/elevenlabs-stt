@@ -663,11 +663,6 @@ def register_one() -> dict[str, Any]:
                 if "Error code from Windows: 0" not in str(e):
                     raise
 
-        window_op("restore")
-        window_op("activate")
-        window_op("maximize")
-        time.sleep(4)
-
         def ensure_window_foreground() -> None:
             hwnd = getattr(new_window, "_hWnd", None)
             if not hwnd or os.name != "nt":
@@ -712,6 +707,15 @@ def register_one() -> dict[str, Any]:
                     return
             raise SystemExit("auto-register could not focus the temporary Chrome window; aborting before sending keys")
 
+        # Foreground the temp Chrome immediately, before any page-load waits.
+        # pygetwindow's activate() is silently denied when we are a background
+        # process, which left the window behind for ~16s until the first click
+        # forced it forward and the key/click sequence landed out of sync.
+        window_op("restore")
+        window_op("maximize")
+        ensure_window_foreground()
+        time.sleep(4)
+
         def hotkey(*keys: str) -> None:
             ensure_window_foreground()
             pyautogui.hotkey(*keys)
@@ -722,8 +726,13 @@ def register_one() -> dict[str, Any]:
 
         def click_frac(x_frac: float, y_frac: float) -> None:
             ensure_window_foreground()
-            pyautogui.click(new_window.left + int(new_window.width * x_frac),
-                            new_window.top + int(new_window.height * y_frac))
+            x = new_window.left + int(new_window.width * x_frac)
+            y = new_window.top + int(new_window.height * y_frac)
+            if x < 0 or y < 0:
+                # A minimized window reports -32000 geometry; pyautogui clamps the
+                # click to (0,0), which hits Chrome's tab-search chevron.
+                raise SystemExit("auto-register got bad temp Chrome window geometry; aborting")
+            pyautogui.click(x, y)
             time.sleep(0.1)
 
         def paste(text: str) -> None:
