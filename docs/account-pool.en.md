@@ -76,11 +76,13 @@ python stt.py transcribe audio.m4a --show-cost
 Auto-registration opens a real Chrome window because selector automation can trigger hCaptcha. For each account, the script:
 
 1. creates a fresh temporary Chrome profile (`--user-data-dir`),
-2. activates only the newly-created Chrome window,
+2. identifies the new window by its temp-profile process handle and brings it to the foreground (your personal Chrome is never touched and can stay open),
 3. completes signup + email verification + web sign-in,
 4. captures tokens via REST,
 5. closes Chrome processes whose command line contains that temp profile name,
 6. deletes the temp profile directory.
+
+Registration drives the temporary window with real keyboard/mouse input, so avoid using the machine's keyboard and mouse during a run; if focus on the temporary window cannot be confirmed, the script aborts before sending any keys.
 
 So a 10-account warm should not leave 10 browsers open. If a run is externally killed, cleanup may not run; remove leftovers with:
 
@@ -96,5 +98,6 @@ Get-ChildItem $env:TEMP -Directory -Filter 'elevenlabs-stt-chrome-*' |
 
 - `temp_email.base_url and temp_email.domain are required`: fill `[temp_email]` or use single-account mode.
 - `email has not been verified`: verification modal was not completed; retry `pool warm`.
+- `auto-register could not focus the temporary Chrome window`: Windows refused to bring the temp window to the foreground (e.g. a fullscreen app is active); the script aborted safely before sending any keys — close fullscreen apps and retry.
 - Browser opens on your personal account: stop the run; auto-registration should only use a temporary profile. Report/fix before continuing.
 - Low memory during large warm: warm one step at a time, e.g. `--target 4`, then `--target 5`.

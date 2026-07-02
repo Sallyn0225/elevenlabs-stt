@@ -76,11 +76,13 @@ python stt.py transcribe audio.m4a --show-cost
 自动注册必须打开真实 Chrome，因为纯 selector 自动化容易触发 hCaptcha。每注册一个账号，脚本会：
 
 1. 创建新的临时 Chrome profile（`--user-data-dir`）；
-2. 只激活新创建的 Chrome 窗口；
+2. 按临时 profile 的进程句柄识别新窗口并将其带到前台（不会碰你已打开的个人 Chrome，个人浏览器可以保持打开）；
 3. 完成注册、邮件验证、网页登录；
 4. 用 REST 捕获 token；
 5. 关闭命令行中包含该临时 profile 名的 Chrome 进程；
 6. 删除临时 profile 目录。
+
+注册过程通过真实键鼠输入驱动临时窗口，期间请不要使用本机键盘鼠标；若临时窗口无法确认获得焦点，脚本会在发送任何按键前直接中止。
 
 所以预热 10 个账号不应该留下 10 个浏览器。如果运行被外部强杀，Python 的 `finally` 可能来不及执行，可手动清理：
 
@@ -96,5 +98,6 @@ Get-ChildItem $env:TEMP -Directory -Filter 'elevenlabs-stt-chrome-*' |
 
 - `temp_email.base_url and temp_email.domain are required`：填写 `[temp_email]`，或改用单账号模式。
 - `email has not been verified`：验证弹窗没有完成；重试 `pool warm`。
+- `auto-register could not focus the temporary Chrome window`：Windows 拒绝把临时窗口切到前台（如有全屏应用占用时）；脚本已在发送按键前安全中止，关闭全屏程序后重试即可。
 - 浏览器打开了你的个人账号：立刻停止；自动注册应该只使用临时 profile。
 - 大量注册导致内存压力：逐步预热，例如先 `--target 4`，再 `--target 5`。
