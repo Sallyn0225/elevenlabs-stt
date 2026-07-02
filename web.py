@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audio_split
@@ -208,10 +209,16 @@ def do_refresh(emails: list[str]) -> dict:
     with _LOCK:
         store = stt.load_accounts()
         wanted = set(emails)
-        for a in store["accounts"]:
-            if a.get("email") in wanted and not a.get("invalid"):
-                stt.account_remaining(a, store, force=True)   # network
-        stt.save_accounts(store)
+        targets = [a for a in store["accounts"]
+                   if a.get("email") in wanted and not a.get("invalid")]
+        # 并行拉额度：每个线程只写自己的账号 dict，落盘延后到全部完成后一次执行，
+        # 避免多线程并发 dump 共享 store 的竞态（含 JWT 轮换的中间保存）。
+        noop = lambda _s: None
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(lambda a: stt.account_remaining(a, store, force=True, save=noop),
+                        targets))
+        if targets:
+            stt.save_accounts(store)
         return build_state()
 
 

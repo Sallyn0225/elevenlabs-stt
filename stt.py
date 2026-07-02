@@ -540,27 +540,29 @@ def cached_remaining(account: dict[str, Any]) -> int | None:
     return max(0, ck.get("limit", 0) - ck.get("count", 0))
 
 
-def account_remaining(account: dict[str, Any], store: dict[str, Any], force: bool = False) -> int | None:
+def account_remaining(account: dict[str, Any], store: dict[str, Any], force: bool = False,
+                      save=save_accounts) -> int | None:
     """Remaining credits for an account. Uses cache within TTL, else fetches (network).
-    On repeated auth failure, quarantines the account as invalid (R3)."""
+    On repeated auth failure, quarantines the account as invalid (R3).
+    `save` lets callers batch persistence (parallel refresh passes a no-op, saves once at the end)."""
     ck = account.get("credits_known")
     if not force and ck and time.time() - ck.get("fetched_at", 0) < CREDITS_CACHE_TTL:
         return cached_remaining(account)
     try:
-        with authed_client(account, save=lambda _s: save_accounts(store)) as client:
+        with authed_client(account, save=lambda _s: save(store)) as client:
             rem = refresh_credits(account, client)
             if rem is not None:  # success → clear any prior auth-failure state
                 account["auth_fails"] = 0
                 account["invalid"] = False
                 account["invalid_reason"] = None
-        save_accounts(store)  # persist credits_known + state (JWT rotation already saved above)
+        save(store)  # persist credits_known + state (JWT rotation already saved above)
         return rem
     except (Exception, SystemExit) as e:
         account["auth_fails"] = account.get("auth_fails", 0) + 1
         if account["auth_fails"] >= 3:
             account["invalid"] = True
             account["invalid_reason"] = str(e)[:120]
-        save_accounts(store)  # persist auth-fail / quarantine state
+        save(store)  # persist auth-fail / quarantine state
         return None
 
 
