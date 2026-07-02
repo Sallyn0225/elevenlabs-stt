@@ -11,6 +11,8 @@ config.toml
 _tmp-sample.m4a
 out.srt
 out.vtt
+webui.log
+webui.pid
 .playwright-mcp/
 *.png
 __pycache__/
