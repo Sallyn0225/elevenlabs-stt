@@ -177,3 +177,10 @@ The script calls the web app's internal API (`api.us.elevenlabs.io`) directly wi
 ```bash
 python stt.py selfcheck
 ```
+
+## Acknowledgements
+
+- [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) — temp-mail backend used by the multi-account auto-registration
+- [Playwright](https://playwright.dev) — browser automation for the one-time login step
+- [httpx](https://www.python-httpx.org) — HTTP client
+- [FFmpeg](https://ffmpeg.org) — optional audio-duration pre-check via `ffprobe`

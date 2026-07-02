@@ -177,3 +177,10 @@ stt selfcheck          离线自检（不联网）
 ```bash
 python stt.py selfcheck
 ```
+
+## 致谢
+
+- [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) — 多账号自动注册依赖的临时邮箱后端
+- [Playwright](https://playwright.dev) — 一次性登录步骤的浏览器自动化
+- [httpx](https://www.python-httpx.org) — HTTP 客户端
+- [FFmpeg](https://ffmpeg.org) — 可选的音频时长预检（`ffprobe`）
