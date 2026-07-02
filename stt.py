@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+import audio_split
+
 # ponytail: constants centralised so endpoint renames are one-line fixes
 FIREBASE_API_KEY = "AIzaSyBSsRE_1Os04-bxpd5JTLIniy3UK4OqKys"
 FIREBASE_USER_KEY = f"firebase:authUser:{FIREBASE_API_KEY}:[DEFAULT]"
@@ -895,6 +897,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     store = load_accounts()
     acfg = accounts_config(config_path)
 
+    if getattr(args, "split", False):
+        return _transcribe_split(args, cfg, files, config_path, store, acfg)
+
     # per-file cost; warn on long clips (soft free-account limit)
     costs: list[tuple[pathlib.Path, int | None]] = []
     for audio in files:
@@ -961,6 +966,190 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         print("pool refill skipped (interrupted)", file=sys.stderr)
     print_summary(results)
     return 0 if all(r[2] == "OK" for r in results) else 1
+
+
+_MERGERS = {"srt": audio_split.merge_srt, "vtt": audio_split.merge_vtt,
+            "txt": audio_split.merge_txt}
+
+
+def _print_split_plan(parents: list[dict[str, Any]]) -> None:
+    """Print the per-input silence-split plan to stderr (AC1)."""
+    print("split plan:", file=sys.stderr)
+    for p in parents:
+        audio = p["audio"]
+        if p.get("error"):
+            print(f"  {audio.name}: ERROR {p['error']}", file=sys.stderr)
+            continue
+        if not p["split"]:
+            total = p["segs"][0][1]
+            print(f"  {audio.name}: 1 segment (<= chunk_secs, no split), {total:.0f}s",
+                  file=sys.stderr)
+            continue
+        print(f"  {audio.name}: {len(p['segs'])} segments", file=sys.stderr)
+        for i, (s, e) in enumerate(p["segs"]):
+            tag = " HARD-CUT" if p["hard"][i] else ""
+            print(f"      part{i:02d}  {s:8.1f}s -> {e:8.1f}s  ({e - s:5.1f}s){tag}",
+                  file=sys.stderr)
+
+
+def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
+    """--split flow: silence-split each long input, transcribe chunks via allocate,
+    then merge per input into one <stem>.<fmt>. See design.md data-flow."""
+    fmt = cfg["export_format"]
+    if fmt not in _MERGERS:  # R7 / AC4: html/pdf/docx/json cannot be merged
+        raise SystemExit(f"--split only supports srt/vtt/txt output, not {fmt!r}")
+
+    chunk_secs = args.chunk_secs or audio_split.default_chunk_secs(
+        acfg["fresh_threshold"], CREDITS_PER_SEC, acfg["selection_margin"])
+    noise_db = args.silence_db if args.silence_db is not None else audio_split.SILENCE_DB_DEFAULT
+    min_silence = (args.silence_min if args.silence_min is not None
+                   else audio_split.SILENCE_MIN_DEFAULT)
+    single = len(files) == 1
+
+    # --- plan: per input build its segment list + flat chunk entries -----------
+    parents: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []  # one per chunk (input+output paths, offset)
+    for audio in files:
+        final = (pathlib.Path(args.output) if single and args.output
+                 else audio.with_suffix(f".{fmt}"))
+        total = audio_duration(audio)
+        if total is None:
+            print(f"note: ffprobe unavailable — {audio.name} cannot be split; "
+                  f"treating as a single segment", file=sys.stderr)
+        try:
+            if total is not None and total > chunk_secs:
+                mids = [(s + e) / 2 for (s, e) in
+                        audio_split.detect_silences(audio, noise_db, min_silence)]
+                segs, hard = audio_split.plan_cuts(total, chunk_secs, mids)
+                workdir = pathlib.Path("out") / f"{audio.stem}-chunks"
+                p = {"audio": audio, "final": final, "split": True, "workdir": workdir,
+                     "segs": segs, "hard": hard, "chunks": []}
+            else:
+                p = {"audio": audio, "final": final, "split": False, "workdir": None,
+                     "segs": [(0.0, total or 0.0)], "hard": [False], "chunks": []}
+        except Exception as e:  # ffmpeg/split failure: skip this input, continue (R-rollback)
+            print(f"warn: cannot split {audio.name}: {e!r}", file=sys.stderr)
+            parents.append({"audio": audio, "final": final, "error": repr(e), "chunks": []})
+            continue
+
+        for ci, (s, e) in enumerate(p["segs"]):
+            if p["split"]:
+                cin = p["workdir"] / f"{audio.stem}.part{ci:02d}{audio.suffix}"
+                cout = cin.with_suffix(f".{fmt}")
+            else:
+                cin, cout = audio, final  # no split: chunk output IS the final file
+            entry = {"parent": p, "index": ci, "input": cin, "output": cout,
+                     "start": s, "dur": (e - s) if total is not None else None,
+                     "ok": None}
+            p.setdefault("entries", []).append(entry)
+            entries.append(entry)
+        parents.append(p)
+
+    _print_split_plan(parents)
+
+    live = [p for p in parents if not p.get("error")]
+    if not entries:
+        raise SystemExit("no inputs could be split/transcribed")
+
+    # --- allocate all chunks across accounts (reuses the multi-file packer) -----
+    costs = [(e["input"], estimate_required(e["dur"])) for e in entries]
+    accounts = [a for a in store["accounts"] if not a.get("invalid")]
+    for a in accounts:
+        account_remaining(a, store)
+    save_accounts(store)
+    plan, register_count = allocate(costs, accounts, acfg["selection_margin"],
+                                    acfg["fresh_threshold"], store)
+    print_plan(plan, register_count, acfg["selection_margin"], acfg["fresh_threshold"])
+
+    if args.dry_run:  # AC1: plan only, no cut, no upload
+        return 0
+
+    # fail fast before any cutting if the shortfall cannot be registered
+    if register_count and not has_temp_email_config(config_path):
+        raise SystemExit(f"need {register_count} more account(s) but [temp_email] not configured")
+
+    # --- materialise chunk files for split inputs ------------------------------
+    for p in list(live):
+        if p["split"]:
+            try:
+                p["chunks"] = audio_split.cut_segments(p["audio"], p["segs"],
+                                                       p["workdir"], p["hard"])
+            except Exception as e:  # cut failed: drop this input's chunks, keep others
+                print(f"warn: cutting {p['audio'].name} failed: {e!r}", file=sys.stderr)
+                p["error"] = repr(e)
+                for entry in p.get("entries", []):
+                    entry["ok"] = False
+                    entry["skipped"] = True
+
+    # register the exact shortfall, bind NEW#k slots -> registered accounts
+    new: list[dict[str, Any]] = []
+    for _ in range(register_count):
+        acct = register_one()
+        upsert_account(store, acct)
+        new.append(acct)
+    if register_count:
+        save_accounts(store)
+    resolved = [(inp, new[int(t.split("#")[1])] if isinstance(t, str) else t)
+                for inp, t in plan]
+    entry_by_input = {e["input"]: e for e in entries}
+
+    # --- transcribe each chunk -------------------------------------------------
+    results = []
+    used: list[dict[str, Any]] = []
+    for inp, account in resolved:
+        entry = entry_by_input[inp]
+        if entry["ok"] is False:  # cut failed upstream; skip upload
+            continue
+        email = account.get("email")
+        store["active"] = email
+        save_accounts(store)
+        if account not in used:
+            used.append(account)
+        try:
+            out = transcribe_one(inp, cfg, account, store, config_path,
+                                 output=str(entry["output"]))
+            entry["ok"] = True
+            results.append((inp, email, "OK", str(out)))
+        except Exception as e:  # skip & continue; parent won't merge (R8)
+            entry["ok"] = False
+            print(f"warn: {inp.name} failed: {e!r}", file=sys.stderr)
+            results.append((inp, email, "FAIL", repr(e)))
+
+    for a in used:
+        account_remaining(a, store, force=True)
+    try:
+        refill_pool(store, config_path)
+    except KeyboardInterrupt:
+        print("pool refill skipped (interrupted)", file=sys.stderr)
+
+    # --- merge per input, or report failure (R6 / R8) --------------------------
+    merger = _MERGERS[fmt]
+    parent_ok = True
+    print_summary(results)
+    print("merge summary:")
+    for p in parents:
+        audio = p["audio"]
+        if p.get("error"):
+            parent_ok = False
+            print(f"  FAIL   {audio.name}   split error: {p['error']}")
+            continue
+        pentries = p.get("entries", [])
+        failed = [e for e in pentries if not e["ok"]]
+        if failed:  # R8: don't write merge; keep chunks + successful outputs
+            parent_ok = False
+            segs = ", ".join(f"part{e['index']:02d}" for e in failed)
+            print(f"  FAIL   {audio.name}   segment(s) {segs} failed; merge skipped, "
+                  f"chunks kept for retry")
+            continue
+        merged = merger([(e["start"], pathlib.Path(e["output"]).read_text(encoding="utf-8"))
+                         for e in sorted(pentries, key=lambda e: e["start"])])
+        pathlib.Path(p["final"]).write_text(merged, encoding="utf-8")
+        print(f"  OK     {audio.name} -> {p['final']} ({len(pentries)} segment(s))")
+        # R9 / AC6: clean temp chunks only on success unless --keep-chunks
+        if p["split"] and p["workdir"] and not args.keep_chunks:
+            shutil.rmtree(p["workdir"], ignore_errors=True)
+
+    return 0 if (parent_ok and all(r[2] == "OK" for r in results)) else 1
 
 
 def cmd_list_languages(args: argparse.Namespace) -> int:
@@ -1041,6 +1230,42 @@ def _selfcheck() -> int:
         assert False, "oversize file should raise"
     except SystemExit:
         pass
+
+    # --- audio_split pure logic (offline; AC7) --------------------------------
+    # default_chunk_secs: chunk fits one fresh account within margin
+    assert audio_split.default_chunk_secs(10000, 13.9, 1.2) == 569
+    # timestamp parse/fmt round-trip (srt comma-ms, vtt dot-ms)
+    assert audio_split.fmt_ts_srt(3661.5) == "01:01:01,500"
+    assert audio_split.fmt_ts_vtt(3661.5) == "01:01:01.500"
+    assert abs(audio_split.parse_ts_srt("01:01:01,500") - 3661.5) < 1e-6
+    assert abs(audio_split.parse_ts_vtt("01:01:01.500") - 3661.5) < 1e-6
+    # plan_cuts: latest silence midpoint in window; MIN_SEG(5s) filters near-start cand
+    segs, hard = audio_split.plan_cuts(500.0, 300.0, [3.0, 100.0, 250.0, 280.0])
+    assert segs == [(0.0, 280.0), (280.0, 500.0)], segs  # 280 = latest cand <= 300; 3 filtered
+    assert hard == [False, False]
+    assert all(e - s <= 300.0 + 1e-9 for s, e in segs)
+    # plan_cuts hard-cut fallback when no silence candidate
+    segs2, hard2 = audio_split.plan_cuts(700.0, 300.0, [])
+    assert segs2 == [(0.0, 300.0), (300.0, 600.0), (600.0, 700.0)], segs2
+    assert hard2 == [True, True, False]
+    # merge_srt: offset correction + start-sort + contiguous renumber from 1
+    c0 = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+    c1 = "1\n00:00:00,500 --> 00:00:01,500\nworld\n"
+    m = audio_split.merge_srt([(0.0, c0), (100.0, c1)])
+    assert m.startswith("1\n"), m
+    assert "\n2\n" in m and m.count("-->") == 2
+    assert "00:01:40,500 --> 00:01:41,500" in m  # world offset by 100s
+    assert "hello" in m and "world" in m
+    # merge_vtt: single WEBVTT header, offset + renumber
+    v0 = "WEBVTT\n\ncue-1\n00:00:00.000 --> 00:00:01.000\nhi\n"
+    v1 = "WEBVTT\n\ncue-1\n00:00:02.000 --> 00:00:03.000\nbye\n"
+    mv = audio_split.merge_vtt([(0.0, v0), (10.0, v1)])
+    assert mv.count("WEBVTT") == 1, mv
+    assert "00:00:12.000 --> 00:00:13.000" in mv  # bye offset by 10s
+    assert "\n1\n" in mv and "\n2\n" in mv
+    # merge_txt: segment-order concatenation
+    assert audio_split.merge_txt([(0.0, "alpha"), (5.0, "beta")]) == "alpha\n\nbeta\n"
+
     print("selfcheck ok")
     return 0
 
@@ -1170,6 +1395,17 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--poll-timeout", type=int, help="poll timeout seconds")
     t.add_argument("--dry-run", action="store_true",
                    help="print the allocation plan and exit (no registration, no upload)")
+    t.add_argument("--split", action="store_true",
+                   help="silence-split long audio into per-account chunks, then merge "
+                        "(srt/vtt/txt only)")
+    t.add_argument("--chunk-secs", type=int,
+                   help="max chunk length in seconds (default derived from account quota)")
+    t.add_argument("--keep-chunks", action="store_true",
+                   help="keep temporary chunk files after a successful merge")
+    t.add_argument("--silence-db", type=float,
+                   help=f"silencedetect noise floor in dB (default {audio_split.SILENCE_DB_DEFAULT})")
+    t.add_argument("--silence-min", type=float,
+                   help=f"silencedetect min silence seconds (default {audio_split.SILENCE_MIN_DEFAULT})")
 
     sub.add_parser("list-languages", help="print supported language names + codes")
     sc = sub.add_parser("selfcheck", help="run offline self-check")
