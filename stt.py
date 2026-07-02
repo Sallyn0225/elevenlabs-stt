@@ -1050,6 +1050,7 @@ def _selfcheck() -> int:
 def cmd_accounts(args: argparse.Namespace) -> int:
     store = load_accounts()
     accts = store["accounts"]
+    wanted = set(args.email or [])
     if not accts:
         print("no accounts. run `stt login` or (once configured) `stt pool warm`.")
         return 0
@@ -1057,13 +1058,21 @@ def cmd_accounts(args: argparse.Namespace) -> int:
         for a in accts:
             if a.get("invalid"):
                 continue
+            if wanted and a.get("email") not in wanted:
+                continue
             rem = account_remaining(a, store, force=True)
             print(f"  refreshed {a.get('email')}: rem={rem}", file=sys.stderr)
+        if wanted:
+            known = {a.get("email") for a in accts}
+            for e in sorted(wanted - known):
+                print(f"  no matching account: {e}", file=sys.stderr)
         save_accounts(store)
     active = store.get("active")
     print(f"{'email':<34} {'src':<7} {'remaining':>9}  state")
     print("-" * 62)
     for a in accts:
+        if wanted and a.get("email") not in wanted:
+            continue
         email = a.get("email") or "?"
         src = a.get("source", "?")
         rem = cached_remaining(a)
@@ -1168,6 +1177,8 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("accounts", help="list accounts + remaining credits")
     a.add_argument("-c", "--config", default=str(CONFIG_PATH), help="config.toml path")
     a.add_argument("--refresh", action="store_true", help="force-refresh credits from the API")
+    a.add_argument("-e", "--email", action="append", default=[], metavar="EMAIL",
+                   help="only act on this account (repeatable); filters both --refresh scope and listing by email")
 
     pool = sub.add_parser("pool", help="account-pool management")
     psub = pool.add_subparsers(dest="pool_cmd", required=True)
