@@ -121,9 +121,9 @@ def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
     allowed 非空时把候选账号限定为所列邮箱（手动模式,未知邮箱静默忽略——预览是弱校验,
     /api/transcribe 里的 stt.filter_accounts 才是强校验）。
 
-    ponytail: mirrors stt.allocate's best-fit but reads cached remaining only —
-    a preview fires on every file add and must not network or write accounts.json.
-    The authoritative allocation at transcribe time still uses stt.allocate.
+    与转录路径共享 stt.pack_bins 装箱核心，但余额只读缓存（cached_remaining）—
+    预览在每次加文件时触发，不允许联网或写 accounts.json。转录时的权威分配
+    仍走 stt.allocate（live 余额）。
 
     Files longer than chunk_secs expand into their real silence-planned segments
     (same _plan_one the transcribe path uses, silences cached per upload), so the
@@ -131,7 +131,6 @@ def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
     """
     acfg = stt.accounts_config(CONFIG_PATH)
     margin, thr = acfg["selection_margin"], acfg["fresh_threshold"]
-    fresh_cap = int(thr * margin)
     chunk_secs = audio_split.default_chunk_secs(thr, stt.CREDITS_PER_SEC, margin)
     store = stt.load_accounts()
     accounts = [a for a in store["accounts"] if not a.get("invalid")]
@@ -140,7 +139,6 @@ def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
         allowed_set = set(allowed)
         accounts = [a for a in accounts if a.get("email") in allowed_set]
 
-    need = lambda req: None if req is None else int(req * margin) + 1
     costs: list[tuple[str, int | None]] = []
     finfo: list[dict] = []  # per input file: name + segCount / splitError
     for it in items:
@@ -159,54 +157,23 @@ def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
         else:
             finfo.append({"name": name})
             costs.append((name, stt.estimate_required(dur)))
-    # largest need first; unknown-duration (None) sorts last (dedicated fresh bin)
-    ordered = sorted(costs, key=lambda fc: (-1 if fc[1] is None else need(fc[1])),
-                     reverse=True)
-
-    class Bin:
-        def __init__(self, email, residual, is_new):
-            self.email, self.residual, self.before = email, residual, residual
-            self.is_new, self.files, self.use = is_new, [], 0
-
-    bins = [Bin(a.get("email"), stt.cached_remaining(a) or 0, False) for a in accounts]
-    virtual: list[Bin] = []
-    register_count = 0
-    total_need = total_credits = 0
-
-    def open_virtual(residual):
-        nonlocal register_count
-        b = Bin("（新账号）", residual, True)
-        virtual.append(b); register_count += 1
-        return b
-
-    oversize: list[str] = []
-    for name, req in ordered:
-        if req is None:
-            b = open_virtual(0)
-        else:
-            n = need(req)
-            if n > fresh_cap:  # can't happen post-split; guard against negative bins
-                oversize.append(name)
-                continue
-            cand = [b for b in bins if b.residual >= n]
-            if cand:
-                b = min(cand, key=lambda b: b.residual)
-            else:
-                vc = [b for b in virtual if b.residual >= n]
-                b = min(vc, key=lambda b: b.residual) if vc else open_virtual(fresh_cap)
-            b.residual -= n
-            b.use += n
-            total_need += n
-            total_credits += req
-        b.files.append(name)
-
-    used = [b for b in bins + virtual if b.files]
-    used.sort(key=lambda b: b.is_new)  # existing accounts first
-    alloc = [{"email": b.email, "files": b.files, "count": len(b.files),
-              "useSum": b.use, "remBefore": b.before, "remAfter": b.before - b.use,
-              "isNew": b.is_new} for b in used]
+    # 与实际转录同一份装箱核心（stt.pack_bins），只是余额喂缓存值（预览不联网）
+    residuals = [(a.get("email"), stt.cached_remaining(a) or 0) for a in accounts]
+    r = stt.pack_bins(costs, residuals, margin, thr)
+    alloc = [{"email": b["handle"] if not b["is_new"] else "（新账号）",
+              "files": b["keys"], "count": len(b["keys"]),
+              "useSum": b["use"], "remBefore": b["before"],
+              "remAfter": b["before"] - b["use"], "isNew": b["is_new"]}
+             for b in r["bins"]]  # pack_bins 已按 existing-first 排序
+    register_count = r["register_count"]
+    oversize = [k for k, _n in r["oversize"]]
+    total_need = sum(b["use"] for b in r["bins"])
+    oversize_keys = set(oversize)
+    total_credits = sum(req for k, req in costs
+                        if req is not None and k not in oversize_keys)
     # 本批最小分配单元的 need：前端灰显"装不下最小段"的账号（弱判据,plan.error 兜底）
-    min_need = min((need(req) for _, req in costs if req is not None), default=None)
+    min_need = min((int(req * margin) + 1 for _, req in costs if req is not None),
+                   default=None)
     out = {"alloc": alloc, "registerCount": register_count,
            "totalNeed": total_need, "totalCredits": total_credits,
            "files": finfo, "oversize": oversize, "minNeed": min_need}

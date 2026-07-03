@@ -802,21 +802,32 @@ def filter_accounts(store: dict[str, Any], emails: list[str]) -> tuple[list[dict
 
 
 class _Bin:
-    """A packing bin: an existing account (account set) or a virtual fresh bin (account None)."""
-    __slots__ = ("account", "residual", "slot")
+    """A packing bin: an existing account handle (slot None) or a virtual fresh bin ("NEW#k")."""
+    __slots__ = ("handle", "residual", "slot", "before", "use", "keys")
 
-    def __init__(self, account, residual, slot=None):
-        self.account = account
+    def __init__(self, handle, residual, slot=None):
+        self.handle = handle
         self.residual = residual
         self.slot = slot  # "NEW#k" label for virtual bins
+        self.before = residual
+        self.use = 0
+        self.keys: list = []
 
 
-def allocate(costs, accounts, margin, fresh_threshold, store):
-    """Bin-pack files across existing accounts (best-fit) then virtual fresh bins.
+def pack_bins(costs, residuals, margin, fresh_threshold) -> dict:
+    """纯装箱核心：FFD 降序 + best-fit，先现有 bin 后虚拟 fresh bin。不联网、不落盘、不 raise。
 
-    costs: [(audio_path, required_or_None)]; accounts: non-invalid account dicts.
-    Returns (plan, register_count) where plan is an ordered list of
-    (audio_path, account_dict_or_"NEW#k"), existing-account files before NEW ones.
+    costs:     [(key, required_credits | None)]   key 任意可哈希（Path 或 str）
+    residuals: [(handle, remaining_int)]          handle 不透明（账号 dict 或 email str）
+    返回 {
+      "assignments":    [(key, handle | "NEW#k")],  # 现有账号项在前、NEW 在后，组内稳定
+      "bins":           [{"handle": handle|"NEW#k", "is_new": bool, "before": int,
+                          "use": int, "keys": [key, ...]}],  # 只含被用到的 bin，existing-first
+      "register_count": int,
+      "oversize":       [(key, need)],              # need > fresh_cap 的项，不进 assignments
+    }
+    规则与原 allocate 完全一致：need = int(req*margin)+1；req None → 独占虚拟 bin
+    （residual 0，不计 use）；fresh_cap = int(fresh_threshold*margin)。
     """
     def need(req):
         return None if req is None else int(req * margin) + 1
@@ -826,20 +837,22 @@ def allocate(costs, accounts, margin, fresh_threshold, store):
     files = sorted(costs, key=lambda fc: (-1 if fc[1] is None else need(fc[1])),
                    reverse=True)
 
-    bins = [_Bin(a, account_remaining(a, store) or 0) for a in accounts]
+    bins = [_Bin(h, r or 0) for h, r in residuals]
     fresh_cap = int(fresh_threshold * margin)
     virtual: list[_Bin] = []
-    plan: list[tuple[Any, Any]] = []
+    assigned: list[tuple[Any, Any, bool]] = []  # (key, target, is_new) — is_new drives the sort
+    oversize: list[tuple[Any, int]] = []
 
     def open_virtual(residual):
         b = _Bin(None, residual, slot=f"NEW#{len(virtual)}")
         virtual.append(b)
         return b
 
-    for file, req in files:
-        if req is None:  # unknown duration -> dedicated fresh bin
+    for key, req in files:
+        if req is None:  # unknown duration -> dedicated fresh bin (use not counted)
             b = open_virtual(0)
-            plan.append((file, b.slot))
+            b.keys.append(key)
+            assigned.append((key, b.slot, True))
             continue
         n = need(req)
         cand = [b for b in bins if b.residual >= n]
@@ -851,15 +864,42 @@ def allocate(costs, accounts, margin, fresh_threshold, store):
                 b = min(vc, key=lambda b: b.residual)
             else:
                 if n > fresh_cap:
-                    raise SystemExit(f"{file}: needs {n} > one free account ({fresh_cap}); out of scope")
+                    oversize.append((key, n))
+                    continue
                 b = open_virtual(fresh_cap)
         b.residual -= n
-        plan.append((file, b.account if b.account is not None else b.slot))
+        b.use += n
+        b.keys.append(key)
+        assigned.append((key, b.handle if b.slot is None else b.slot, b.slot is not None))
 
-    register_count = len(virtual)
-    # existing-account files first, NEW#k files last; stable within each group.
-    plan.sort(key=lambda pa: isinstance(pa[1], str))
-    return plan, register_count
+    # existing-account items first, NEW#k items last; stable within each group.
+    assigned.sort(key=lambda ktn: ktn[2])
+    used = [b for b in bins + virtual if b.keys]
+    used.sort(key=lambda b: b.slot is not None)
+    return {
+        "assignments": [(k, t) for k, t, _ in assigned],
+        "bins": [{"handle": b.slot if b.slot is not None else b.handle,
+                  "is_new": b.slot is not None, "before": b.before,
+                  "use": b.use, "keys": b.keys} for b in used],
+        "register_count": len(virtual),
+        "oversize": oversize,
+    }
+
+
+def allocate(costs, accounts, margin, fresh_threshold, store):
+    """Bin-pack files across existing accounts (best-fit) then virtual fresh bins.
+
+    costs: [(audio_path, required_or_None)]; accounts: non-invalid account dicts.
+    Returns (plan, register_count) where plan is an ordered list of
+    (audio_path, account_dict_or_"NEW#k"), existing-account files before NEW ones.
+    """
+    residuals = [(a, account_remaining(a, store) or 0) for a in accounts]
+    r = pack_bins(costs, residuals, margin, fresh_threshold)
+    if r["oversize"]:  # FFD 序保证首个 oversize 即原实现 raise 的那一项
+        key, n = r["oversize"][0]
+        fresh_cap = int(fresh_threshold * margin)
+        raise SystemExit(f"{key}: needs {n} > one free account ({fresh_cap}); out of scope")
+    return r["assignments"], r["register_count"]
 
 
 # ------------------------------------------------------------- subcommands
@@ -1367,6 +1407,19 @@ def _selfcheck() -> int:
         assert False, "oversize file should raise"
     except SystemExit:
         pass
+    # pack_bins: 纯核心与 allocate 同规则；oversize 收集而非 raise
+    r = pack_bins([("f800", 800), ("f5000", 5000), ("f7000", 7000), ("f400", 400)],
+                  [("a", 1000), ("b", 6000)], margin=1.0, fresh_threshold=10000)
+    assert r["register_count"] == 1 and dict(r["assignments"])["f7000"] == "NEW#0"
+    assert [b["is_new"] for b in r["bins"]] == sorted(b["is_new"] for b in r["bins"]), \
+        "existing bins before NEW bins"
+    for b in r["bins"]:
+        assert b["is_new"] or b["use"] <= b["before"], f"over-commit: {b}"
+    r2 = pack_bins([("big", 20000)], [("a", 1000)], 1.0, 10000)
+    assert r2["oversize"] == [("big", 20001)] and r2["assignments"] == []
+    r3 = pack_bins([("fu", None)], [("a", 1000)], 1.0, 10000)
+    assert r3["register_count"] == 1 and dict(r3["assignments"])["fu"] == "NEW#0"
+    assert r3["bins"][-1]["use"] == 0 and r3["bins"][-1]["before"] == 0  # unknown req 不计 use
     # register_shortfall(store, 0): 不触发注册、不落盘（零成本冒烟）
     assert register_shortfall({"accounts": [], "active": None}, 0) == []
 
