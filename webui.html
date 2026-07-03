@@ -47,6 +47,7 @@ const S = {
   selected:[], revealed:[],
   loginOpen:false, regOpen:false,
   page:1, pageSize:5, login:null, reg:null, busy:null,   // pagination + login/register flow
+  regProgress:null,          // /api/accounts/register/progress payload (注册弹窗日志区)
   _pageEmails:[], _page:1, _totalPages:1,        // filled by accountsView() for handlers
   // 功能管理 · 长音频切分：files 复用 upload 流,plans 存后端真实切分方案(id→{segments,hard,error})
   tool:{files:[],plans:{},expanded:[],results:[],outPath:'out',chunkSecs:'',
@@ -461,8 +462,17 @@ function modalsHTML(){
     const regIn=(field,ph,type,extra)=>`<input data-input="reg.${field}" value="${esc(r[field]==null?'':r[field])}"${type?` type="${type}"`:''}${extra||''} placeholder="${ph}" style="width:100%;box-sizing:border-box;height:40px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;outline:none" class="mono"/>`;
     const lbl=(t,code)=>`<label style="font-size:13px;font-weight:500">${t}${code?` <span class="mono" style="color:var(--mut-fg);font-weight:400;font-size:11.5px">${code}</span>`:''}</label>`;
     const seg2=on=>`flex:1;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;${on?'background:var(--accent);color:var(--accent-fg)':'color:var(--mut-fg)'}`;
-    const body=busy
-      ? `<div style="padding:22px;display:flex;align-items:center;gap:11px;font-size:13px;color:var(--mut-fg)">${SPINNER}<span>注册机运行中 — 正在批量创建满额账号,可能需要几分钟,请勿关闭本页…</span></div>`
+    const rp=S.regProgress;
+    const showLog=busy||(rp&&rp.error);   // 失败时弹窗保留日志,不回到配置表单
+    const body=showLog
+      ? `<div style="padding:22px;display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;align-items:center;gap:11px;font-size:13px;color:var(--mut-fg)">
+            ${busy?SPINNER+'<span>注册机运行中 — 正在批量创建满额账号,可能需要几分钟,请勿关闭本页…</span>':`<span style="color:var(--red);font-weight:600">注册中断</span>`}
+            <span class="mono" style="margin-left:auto;flex:none;color:var(--fg)">已完成 ${rp?rp.done||0:0}/${rp?rp.total||0:0}</span></div>
+          <div data-reglog style="height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--muted2);padding:10px 12px;font-size:12px;line-height:1.7" class="mono">
+            ${rp&&rp.lines&&rp.lines.length?rp.lines.map(l=>`<div>${esc(l)}</div>`).join(''):'<div style="color:var(--mut-fg)">等待日志…</div>'}
+            ${rp&&rp.error?`<div style="color:var(--red)">${esc(rp.error)}</div>`:''}</div>
+        </div>`
       : `<div style="padding:22px;display:flex;flex-direction:column;gap:15px;max-height:calc(90vh - 150px);overflow:auto">
           <p style="margin:0;font-size:12.5px;line-height:1.55;color:var(--mut-fg)">对应 <span class="mono" style="color:var(--fg)">config.toml → [temp_email]</span>。保存会写回本地配置文件(双向同步)。注册机调用临时邮箱后端申请邮箱、完成 ElevenLabs 验证并批量创建满额账号,写入本机账号池。</p>
           <div style="display:flex;flex-direction:column;gap:7px">${lbl('临时邮箱后端地址','base_url')}${regIn('base_url','https://mail.example.com')}</div>
@@ -717,6 +727,7 @@ function render(){
   const view = S.view==='transcribe'?transcribeView():S.view==='accounts'?accountsView():toolsView();
   app.innerHTML = headerHTML() + view + modalsHTML();
   updateTopBtn();
+  const lg=document.querySelector('[data-reglog]'); if(lg)lg.scrollTop=lg.scrollHeight; // 注册日志区滚动到底
 }
 
 // back-to-top: a single persistent button outside #app, shown on the accounts page
@@ -891,7 +902,7 @@ document.addEventListener('click',e=>{
     exportSel(){exportAccounts(S.selected.slice());},
     closeImport(){S.importOpen=null;render();},
     openLogin(){S.login={email:'',password:''};S.loginOpen=true;render();}, closeLogin(){if(S.busy!=='login'){S.loginOpen=false;render();}},
-    openReg(){const te=(S.data&&S.data.tempEmail)||{};S.reg={base_url:te.base_url||'',admin_password:te.admin_password||'',site_password:te.site_password||'',domain:te.domain||'',domains:te.domains||[],use_admin_path:te.use_admin_path!==false,poll_interval_secs:te.poll_interval_secs!=null?te.poll_interval_secs:3,poll_timeout_secs:te.poll_timeout_secs!=null?te.poll_timeout_secs:120,target:(S.data&&S.data.pool&&S.data.pool.target)||3};S.regOpen=true;render();}, closeReg(){if(S.busy!=='register'){S.regOpen=false;render();}},
+    openReg(){const te=(S.data&&S.data.tempEmail)||{};S.reg={base_url:te.base_url||'',admin_password:te.admin_password||'',site_password:te.site_password||'',domain:te.domain||'',domains:te.domains||[],use_admin_path:te.use_admin_path!==false,poll_interval_secs:te.poll_interval_secs!=null?te.poll_interval_secs:3,poll_timeout_secs:te.poll_timeout_secs!=null?te.poll_timeout_secs:120,target:(S.data&&S.data.pool&&S.data.pool.target)||3};S.regOpen=true;render();}, closeReg(){if(S.busy!=='register'){S.regOpen=false;S.regProgress=null;render();}},
     setAdminPath(){S.reg.use_admin_path=true;render();}, setApiPath(){S.reg.use_admin_path=false;render();},
     decCount(){S.reg.target=Math.max(1,(+S.reg.target||1)-1);render();}, incCount(){S.reg.target=(+S.reg.target||0)+1;render();},
     doLogin(){runLogin();},
@@ -992,18 +1003,26 @@ async function runLogin(){
 function regPayload(){const r=S.reg||{};return {temp_email:{base_url:r.base_url,admin_password:r.admin_password,site_password:r.site_password,domain:r.domain,use_admin_path:!!r.use_admin_path,poll_interval_secs:r.poll_interval_secs,poll_timeout_secs:r.poll_timeout_secs},pool_target:r.target};}
 async function saveRegConfig(){const res=await api('/api/config/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(regPayload())});if(res&&!res.error)S.data=res;return res;}
 async function runRegSave(){const res=await saveRegConfig();toast(res&&res.error?res.error:'配置已保存到 config.toml');render();}
+// 注册进度轮询：注册 POST 阻塞期间每秒拉一次 /api/accounts/register/progress
+async function pollRegProgress(){
+  try{S.regProgress=await api('/api/accounts/register/progress');render();}catch(e){}
+}
 // real 启动注册机 → sync config to config.toml, then run `pool warm` to the target
 async function runRegister(){
   const t=parseInt(String((S.reg&&S.reg.target)||'').replace(/[^0-9]/g,''),10);
   if(!t||t<1){toast('请输入有效的目标数量');return;}
-  S.busy='register'; render();
+  S.busy='register'; S.regProgress=null; render();
+  let timer=null;
   try{
     const saved=await saveRegConfig();                 // sync config.toml first
     if(saved&&saved.error){toast(saved.error);S.busy=null;render();return;}
+    timer=setInterval(pollRegProgress,1000);
     const res=await api('/api/accounts/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:t})});
-    if(res.error){toast(res.error);}
-    else{S.data=res;S.regOpen=false;toast('注册完成');}
-  }catch(e){toast('注册失败');}
+    clearInterval(timer); timer=null;
+    await pollRegProgress();                           // 补齐尾部日志(含 error 行)
+    if(res.error){if(res.state)S.data=res.state;toast(res.error);}   // 失败:弹窗留在日志视图
+    else{S.data=res;S.regOpen=false;S.regProgress=null;toast('注册完成');}
+  }catch(e){if(timer)clearInterval(timer);toast('注册失败');}
   S.busy=null; render();
 }
 

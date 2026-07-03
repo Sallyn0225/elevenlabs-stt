@@ -567,6 +567,16 @@ def account_remaining(account: dict[str, Any], store: dict[str, Any], force: boo
         return None
 
 
+# ---- register progress log hook --------------------------------------------
+# web.py 注册期间替换为收集函数以驱动 WebUI 进度轮询；None → 默认打 stderr。
+REGISTER_LOG = None
+
+
+def _rlog(msg: str) -> None:
+    """Register-flow progress line: routed to the REGISTER_LOG hook or stderr."""
+    (REGISTER_LOG or (lambda m: print(f"[register] {m}", file=sys.stderr)))(msg)
+
+
 def register_one() -> dict[str, Any]:
     """Create one ElevenLabs account via temp-mail + real Chrome, then return account."""
     try:
@@ -574,8 +584,10 @@ def register_one() -> dict[str, Any]:
     except ImportError:
         raise SystemExit("auto-register needs pyautogui pyperclip pygetwindow")
 
+    _rlog("创建临时邮箱...")
     addr = temp_email_create()
     email = addr["address"]
+    _rlog(f"临时邮箱已创建: {email}")
     password = random_password()
     chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
     profile_dir = tempfile.mkdtemp(prefix="elevenlabs-stt-chrome-")
@@ -627,6 +639,7 @@ def register_one() -> dict[str, Any]:
         }
     proc = None
     try:
+        _rlog("启动临时 Chrome...")
         proc = subprocess.Popen([
             chrome,
             f"--user-data-dir={profile_dir}",
@@ -638,6 +651,7 @@ def register_one() -> dict[str, Any]:
             "https://elevenlabs.io/app/sign-up",
         ], **chrome_startup_kwargs)
         new_window = None
+        _rlog("等待临时 Chrome 窗口出现（最长 30s）...")
         # 30s: a brand-new profile cold-starts slowly (profile init + AV scan); 10s
         # missed the window on busy machines and the finally-block killed late Chrome.
         deadline = time.time() + 30
@@ -714,6 +728,7 @@ def register_one() -> dict[str, Any]:
         # pygetwindow's activate() is silently denied when we are a background
         # process, which left the window behind for ~16s until the first click
         # forced it forward and the key/click sequence landed out of sync.
+        _rlog("窗口已找到，置顶并等待页面渲染...")
         window_op("restore")
         window_op("maximize")
         ensure_window_foreground()
@@ -747,12 +762,15 @@ def register_one() -> dict[str, Any]:
         # for the app to render instead of re-navigating (visible reload).
         time.sleep(12)
 
+        _rlog("填写注册表单...")
         click_frac(0.50, 0.56)  # signup email
         hotkey("ctrl", "a"); paste(email)
         press("tab"); paste(password)
         press("enter")
 
+        _rlog(f"等待验证邮件（最长 {temp_email_config()['poll_timeout_secs']}s）...")
         link = latest_verify_link(addr["jwt"])
+        _rlog("打开验证链接并确认...")
         hotkey("ctrl", "l")
         paste(link)
         press("enter")
@@ -761,16 +779,19 @@ def register_one() -> dict[str, Any]:
         click_frac(0.50, 0.62)
         click_frac(0.65, 0.62)  # verification modal Continue fallback
         time.sleep(8)
+        _rlog("用新账号登录...")
         click_frac(0.50, 0.62)  # sign-in email
         hotkey("ctrl", "a"); paste(email)
         press("tab"); paste(password)
         press("enter")
         time.sleep(15)
 
+        _rlog("拉取账号积分...")
         account = account_from_password_signin(email, password, temp_address=email)
         with authed_client(account, save=lambda _s: None) as client:
             client.get("/v1/user")
             refresh_credits(account, client)
+        _rlog(f"注册完成: {email}，剩余积分 {cached_remaining(account)}")
         return account
     finally:
         if shutil.which("powershell"):
@@ -802,7 +823,7 @@ def refill_pool(store: dict[str, Any], config_path: pathlib.Path) -> None:
         return
     active = store.get("active")
     while fresh_count(store, acfg["fresh_threshold"]) < acfg["pool_target"]:
-        print("pool below target; registering refill account...", file=sys.stderr)
+        _rlog("账号池低于目标，注册补充账号...")
         account = register_one()
         upsert_account(store, account)
         store["active"] = active
@@ -1051,7 +1072,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     # register the exact shortfall up-front, then bind NEW#k slots -> registered accounts
     new: list[dict[str, Any]] = []
-    for _ in range(register_count):
+    for i in range(register_count):
+        _rlog(f"注册缺口账号 {i + 1}/{register_count}")
         acct = register_one()
         upsert_account(store, acct)
         new.append(acct)
@@ -1204,7 +1226,8 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
 
     # register the exact shortfall, bind NEW#k slots -> registered accounts
     new: list[dict[str, Any]] = []
-    for _ in range(register_count):
+    for i in range(register_count):
+        _rlog(f"注册缺口账号 {i + 1}/{register_count}")
         acct = register_one()
         upsert_account(store, acct)
         new.append(acct)
@@ -1387,6 +1410,16 @@ def _selfcheck() -> int:
     # merge_txt: segment-order concatenation
     assert audio_split.merge_txt([(0.0, "alpha"), (5.0, "beta")]) == "alpha\n\nbeta\n"
 
+    # REGISTER_LOG hook: collector receives _rlog lines; None default restored
+    global REGISTER_LOG
+    got: list[str] = []
+    REGISTER_LOG = got.append
+    try:
+        _rlog("hook-test")
+    finally:
+        REGISTER_LOG = None
+    assert got == ["hook-test"], got
+
     print("selfcheck ok")
     return 0
 
@@ -1448,12 +1481,19 @@ def cmd_pool_warm(args: argparse.Namespace) -> int:
     store = load_accounts()
     acfg = accounts_config(pathlib.Path(args.config))
     target = args.target or acfg["pool_target"]
+    k = 0
     while True:
         fresh = fresh_count(store, acfg["fresh_threshold"])
         if fresh >= target:
             print(f"pool warm: {fresh}/{target}")
             return 0
-        account = register_one()
+        k += 1
+        _rlog(f"账号池 {fresh}/{target}，开始注册第 {k} 个账号")
+        try:
+            account = register_one()
+        except (Exception, SystemExit) as e:
+            _rlog(f"注册失败: {e}")
+            raise
         upsert_account(store, account)
         save_accounts(store)
 

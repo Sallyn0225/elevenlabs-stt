@@ -286,16 +286,55 @@ def do_login(email: str, password: str) -> dict:
         return build_state()
 
 
-def do_register(target: int | None) -> dict:
-    """Warm the pool to `target` fresh accounts via the real register flow.
+# In-memory register progress, polled by GET /api/accounts/register/progress.
+# ponytail: plain dict + GIL-atomic appends; _REG_LOCK only guards the active
+# check-and-set. Single-user tool — one register run at a time is the contract.
+_REG_PROGRESS: dict = {"active": False, "lines": [], "done": 0, "total": 0, "error": None}
+_REG_LOCK = threading.Lock()
 
-    ponytail: delegate to stt.cmd_pool_warm (register_one + config.toml [temp_email]);
-    no in-browser config form, no logic copied here. target=None falls back to the
-    configured pool_target.
+
+def _reg_log(msg: str) -> None:
+    _REG_PROGRESS["lines"].append(msg)
+    if len(_REG_PROGRESS["lines"]) > 500:   # defensive cap; a run is ~dozens of lines
+        del _REG_PROGRESS["lines"][:-500]
+
+
+def do_register(target: int | None) -> dict:
+    """Warm the pool to `target` fresh accounts via the real register flow,
+    streaming stt's step logs into _REG_PROGRESS for the UI to poll.
+
+    ponytail: inlines cmd_pool_warm's small loop instead of delegating, so `done`
+    counts accurately and accounts already registered survive a mid-run failure
+    (saved every round). target=None falls back to the configured pool_target.
     """
-    import argparse
-    stt.cmd_pool_warm(argparse.Namespace(target=target, config=str(CONFIG_PATH)))
-    return build_state()
+    with _REG_LOCK:
+        if _REG_PROGRESS["active"]:
+            return {"error": "注册已在进行中"}
+        _REG_PROGRESS.update(active=True, lines=[], done=0, total=0, error=None)
+    stt.REGISTER_LOG = _reg_log
+    try:
+        acfg = stt.accounts_config(CONFIG_PATH)
+        tgt = target or acfg["pool_target"]
+        store = stt.load_accounts()
+        fresh = stt.fresh_count(store, acfg["fresh_threshold"])
+        _REG_PROGRESS["total"] = max(0, tgt - fresh)
+        while fresh < tgt:
+            _reg_log(f"账号池 {fresh}/{tgt}，开始注册第 {_REG_PROGRESS['done'] + 1} 个账号")
+            account = stt.register_one()
+            with _LOCK:
+                stt.upsert_account(store, account)
+                stt.save_accounts(store)
+            _REG_PROGRESS["done"] += 1
+            fresh = stt.fresh_count(store, acfg["fresh_threshold"])
+        _reg_log(f"注册结束：账号池 {fresh}/{tgt}")
+        return build_state()
+    except (Exception, SystemExit) as e:
+        msg = f"注册失败: {e}" if isinstance(e, SystemExit) else f"注册失败: {e!r}"
+        _REG_PROGRESS["error"] = msg   # UI 把 error 单独渲染成红色行,不重复进 lines
+        return {"error": msg, "state": build_state()}
+    finally:
+        stt.REGISTER_LOG = None
+        _REG_PROGRESS["active"] = False
 
 
 def _toml_scalar(v) -> str:
@@ -654,6 +693,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             self._send_json(build_state())
+            return
+        if path == "/api/accounts/register/progress":
+            self._send_json(_REG_PROGRESS)
             return
         self.send_error(404)
 
