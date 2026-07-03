@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +59,8 @@ DEFAULTS: dict[str, Any] = {
     "export_format": "srt",
     "poll_timeout_secs": 600,
     "show_cost": False,
+    "max_concurrency": 4,   # 跨账号并发 worker 上限；1 = 回退串行（降级开关）
+    "stagger_secs": 2.0,    # 相邻上传起始的最小间隔（秒）；0 = 不错峰
 }
 
 # ponytail: section defaults kept as flat dicts; merged over by config.toml sections
@@ -200,7 +203,18 @@ def _session_to_account(sess: dict[str, Any], source: str) -> dict[str, Any]:
     }
 
 
+# 并发转录下多线程各自触发落盘（JWT 轮换回调、注册线程 upsert）；持锁写文件
+# 杜绝两个线程交错写出半个 JSON。dict 字段赋值本身 GIL 原子，撕裂读无害。
+_STORE_LOCK = threading.Lock()
+
+
 def save_accounts(store: dict[str, Any]) -> None:
+    with _STORE_LOCK:
+        _write_accounts(store)
+
+
+def _write_accounts(store: dict[str, Any]) -> None:
+    """Unlocked write; call only while holding _STORE_LOCK (or single-threaded)."""
     ACCOUNTS_PATH.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
         os.chmod(ACCOUNTS_PATH, 0o600)
@@ -372,9 +386,10 @@ def create_task(client: httpx.Client, audio: pathlib.Path, opts: dict[str, Any])
     return r.json()
 
 
-def poll_task(client: httpx.Client, task_id: str, timeout: float) -> dict:
+def poll_task(client: httpx.Client, task_id: str, timeout: float, label: str = "") -> dict:
     deadline = time.time() + timeout
     last_progress = -1.0
+    tag = f"[{label}] " if label else ""  # 并发下区分是哪个文件在跑
     while time.time() < deadline:
         r = client.get(f"/v1/speech-to-text/tasks/{task_id}")
         if r.status_code != 200:
@@ -383,7 +398,7 @@ def poll_task(client: httpx.Client, task_id: str, timeout: float) -> dict:
         state = task.get("state", "")
         progress = task.get("progress", 0.0)
         if progress != last_progress:
-            _tlog(f"{state} {progress*100:.0f}%")
+            _tlog(f"{tag}{state} {progress*100:.0f}%")
             last_progress = progress
         if task.get("last_error"):
             raise SystemExit(f"transcription failed: {task['last_error']}")
@@ -1004,86 +1019,181 @@ def transcribe_one(audio, cfg, account, store, config_path, output=None) -> path
             if credits is not None:
                 print(f"estimated cost: {credits} credits", file=sys.stderr)
 
-        _tlog(f"上传 {audio.name} ({size/1e6:.1f} MB)…")
+        _stagger_wait(float(cfg.get("stagger_secs", 0) or 0))  # 错峰：只对上传起始限速
+        _tlog(f"[{audio.name}] 上传 ({size/1e6:.1f} MB)…")
         task = create_task(client, audio, cfg)
         task_id = task["_id"]
-        _tlog(f"任务 {task_id} 已创建 (state={task.get('state')})")
+        _tlog(f"[{audio.name}] 任务 {task_id} 已创建 (state={task.get('state')})")
 
-        result = poll_task(client, task_id, cfg["poll_timeout_secs"])
+        result = poll_task(client, task_id, cfg["poll_timeout_secs"], label=audio.name)
         lang_code = (result.get("result") or {}).get("language_code")
 
         fmt = cfg["export_format"]
-        _tlog(f"导出 {fmt}…")
+        _tlog(f"[{audio.name}] 导出 {fmt}…")
         content = export_task(client, task_id, fmt, lang_code)
 
     out = pathlib.Path(output) if output else audio.with_suffix(f".{fmt}")
     out.write_bytes(content)
     print(f"wrote {out} ({len(content)} bytes)")  # stdout 结果行契约不变
-    _tlog(f"完成 {out.name}")
+    _tlog(f"[{audio.name}] 完成 {out.name}")
     return out
 
 
-def register_shortfall(store, count: int) -> list[dict[str, Any]]:
-    """注册 count 个新账号，逐个 upsert 进 store。
-    落盘语义：全部成功 → 结束时 save 一次；中途异常 → 先 save（保住已注册的）再 raise。"""
-    new: list[dict[str, Any]] = []
-    try:
-        for i in range(count):
-            _rlog(f"注册缺口账号 {i + 1}/{count}")
-            acct = register_one()
-            upsert_account(store, acct)
-            new.append(acct)
-    except BaseException:  # KeyboardInterrupt 也保住已注册账号（一个 ~1 分钟，丢了最贵）
-        if new:
-            save_accounts(store)
-        raise
-    if count:
-        save_accounts(store)
-    return new
+def group_plan(plan) -> tuple[list, dict[int, list]]:
+    """按目标分组（纯函数）：existing 账号各一组，NEW#k 槽位各一组，组内保持 plan 序。
 
-
-def resolve_plan(plan, new_accounts) -> list[tuple[Any, dict[str, Any]]]:
-    """把 allocate 输出里的 "NEW#k" 槽位换成 register_shortfall 返回的真实账号。"""
-    return [(inp, new_accounts[int(t.split("#")[1])] if isinstance(t, str) else t)
-            for inp, t in plan]
-
-
-def run_plan(resolved, cfg, store, config_path, output_for,
-             on_start=None, on_done=None) -> tuple[list, list]:
-    """逐项执行转录计划；结束后对用过的账号 force 刷新额度。
-
-    resolved:   [(input_path, account_dict)]（NEW#k 已换成真实账号、上游失败项已滤掉）
-    output_for: input_path -> 输出路径 str | None（None = transcribe_one 默认命名）
-    on_start:   可选 (i, total, inp, account) 回调，转录该项之前调用（web 进度用）
-    on_done:    可选 (inp, ok) 回调，该项结束后调用（web done 计数用）
-    返回 (results, used)：results 元素为 (inp, email, "OK"|"FAIL", detail)，与
-    print_summary 的元组契约一致；detail 成功时是输出路径 str，失败时 repr(e)。
+    plan: allocate 输出 [(input, account_dict | "NEW#k")]
+    返回 (existing_groups, pending)：
+      existing_groups = [(account_dict, [(plan_idx, input), ...])]（首次出现序）
+      pending         = {k: [(plan_idx, input), ...]}（NEW#k 槽位号 → 项）
     """
-    results, used = [], []
-    total = len(resolved)
-    for i, (inp, account) in enumerate(resolved, 1):
+    existing: dict[str, tuple[dict[str, Any], list]] = {}
+    order: list[str] = []
+    pending: dict[int, list] = {}
+    for idx, (inp, target) in enumerate(plan):
+        if isinstance(target, str):
+            pending.setdefault(int(target.split("#")[1]), []).append((idx, inp))
+        else:
+            email = target.get("email")
+            if email not in existing:
+                existing[email] = (target, [])
+                order.append(email)
+            existing[email][1].append((idx, inp))
+    return [existing[e] for e in order], pending
+
+
+# 错峰闸：全局取号，保证任意两次上传起始至少间隔 stagger_secs（同 IP 突发风控）。
+_GATE_LOCK = threading.Lock()
+_GATE_NEXT = 0.0
+
+
+def _stagger_wait(stagger_secs: float, clock=time.monotonic, sleep=time.sleep) -> float:
+    """上传前取号并 sleep；返回实际等待秒数。stagger_secs <= 0 短路（不错峰）。
+    clock/sleep 可注入，selfcheck 离线验证闸行为。"""
+    global _GATE_NEXT
+    if stagger_secs <= 0:
+        return 0.0
+    with _GATE_LOCK:
+        now = clock()
+        wait = max(0.0, _GATE_NEXT - now)
+        _GATE_NEXT = max(_GATE_NEXT, now) + stagger_secs
+    sleep(wait)
+    return wait
+
+
+def run_plan_pipelined(plan, cfg, store, config_path, output_for, register_count=0,
+                       register_fn=register_one, on_start=None, on_done=None,
+                       on_active=None, refresh_used=True,
+                       transcribe_fn=None) -> tuple[list, list]:
+    """按账号分组并发执行转录计划；缺口账号边注册边投产（流水线）。
+
+    plan:        allocate 输出 [(input, account_dict | "NEW#k")]（上游失败项已滤掉）
+    output_for:  input -> 输出路径 str | None（None = transcribe_one 默认命名）
+    on_start:    可选 (i, total, inp, account) 回调，转录该项之前调用
+    on_done:     可选 (inp, ok) 回调，该项结束后调用（web done 计数用；注册失败标 FAIL 的项也会回调）
+    on_active:   可选 (inp, stage|None) 回调，进入/离开转录时调用（web 活动任务列表用）
+    refresh_used: 结束后是否 force 刷新用过账号的额度（selfcheck 传 False 保持离线）
+    register_fn / transcribe_fn / refresh_used 可注入，selfcheck 离线覆盖注册失败路径。
+
+    语义：同账号内任务严格串行，不同账号并行（上限 cfg["max_concurrency"]，1 = 回退串行）；
+    注册线程单独串行推进，每注册好一个账号立刻提交其 NEW#k 组，注册中途失败则停止后续
+    注册、未注册槽位的项标 FAIL（已在跑的组照常完成，已注册账号已落盘）。
+    不再逐项挪动 store["active"]（并发下无意义的共享写；login/register 仍照常设置它）。
+    返回 (results, used)：results 按 plan 原顺序，(inp, email, "OK"|"FAIL", detail) 契约不变。
+    """
+    total = len(plan)
+    existing_groups, pending = group_plan(plan)
+    results_by_idx: dict[int, tuple] = {}
+    used: list[dict[str, Any]] = []
+    used_lock = threading.Lock()
+    stop = threading.Event()
+    do_one = transcribe_fn or transcribe_one
+
+    def run_group(account, items):  # 同账号内严格串行；组间由线程池并行
         email = account.get("email")
-        if on_start:
-            on_start(i, total, inp, account)
-        _tlog(f"[{i}/{total}] {inp.name} → {email}")
-        store["active"] = email
-        save_accounts(store)
-        if account not in used:
-            used.append(account)
-        try:
-            out = transcribe_one(inp, cfg, account, store, config_path, output_for(inp))
-            results.append((inp, email, "OK", str(out)))
-            ok = True
-        except Exception as e:  # skip & continue
-            _tlog(f"warn: {inp.name} failed: {e!r}")
-            results.append((inp, email, "FAIL", repr(e)))
-            ok = False
-        if on_done:
-            on_done(inp, ok)
-    for a in used:
+        with used_lock:
+            if account not in used:
+                used.append(account)
+        for idx, inp in items:
+            if stop.is_set():
+                results_by_idx[idx] = (inp, email, "FAIL", "cancelled")
+                continue
+            if on_start:
+                on_start(idx + 1, total, inp, account)
+            if on_active:
+                on_active(inp, "转录中")
+            _tlog(f"[{idx + 1}/{total}] {inp.name} → {email}")
+            try:
+                out = do_one(inp, cfg, account, store, config_path, output_for(inp))
+                results_by_idx[idx] = (inp, email, "OK", str(out))
+                ok = True
+            except Exception as e:  # skip & continue
+                _tlog(f"warn: {inp.name} failed: {e!r}")
+                results_by_idx[idx] = (inp, email, "FAIL", repr(e))
+                ok = False
+            finally:
+                if on_active:
+                    on_active(inp, None)
+            if on_done:
+                on_done(inp, ok)
+
+    def fail_slots(from_k: int, reason: str) -> None:
+        """注册停止后，把绑定到未注册槽位的项全部标 FAIL。"""
+        for k in range(from_k, register_count):
+            for idx, inp in pending.get(k, []):
+                results_by_idx[idx] = (inp, f"NEW#{k}", "FAIL", reason)
+                if on_done:
+                    on_done(inp, False)
+
+    max_workers = max(1, int(cfg.get("max_concurrency", DEFAULTS["max_concurrency"])))
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    futures = []
+
+    def run_register():  # 注册天然串行（pyautogui 前台独占）；不占线程池 worker
+        for k in range(register_count):
+            if stop.is_set():
+                fail_slots(k, "cancelled")
+                return
+            try:
+                _rlog(f"注册缺口账号 {k + 1}/{register_count}")
+                acct = register_fn()
+                with _STORE_LOCK:  # 注册成功立刻落盘（一个 ~1 分钟，丢了最贵）
+                    upsert_account(store, acct)
+                    _write_accounts(store)
+                futures.append(ex.submit(run_group, acct, pending.get(k, [])))
+            except BaseException as e:  # 停止后续注册；已在跑的组照常完成。
+                # 落盘/submit 失败也必须走这里：线程静默死掉会让绑定槽位的行
+                # 从 results 消失（print_summary 少行、web 条目卡在“未执行”）。
+                _rlog(f"注册失败，剩余 {register_count - k} 个槽位的任务标记失败: {e!r}")
+                fail_slots(k, f"注册失败: {e!r}")
+                return
+
+    reg_thread = None
+    try:
+        for account, items in existing_groups:  # 已有账号的任务立即开跑（R3/AC3）
+            futures.append(ex.submit(run_group, account, items))
+        if register_count:
+            # ponytail: daemon 线程 — Ctrl+C 不再能像旧串行版那样打断 register_one 内部
+            # 并触发其 finally 清理（正在注册的 Chrome 可能残留，下次注册/手动关闭兜底）；
+            # 换来的是主线程可即时响应中断。stop 事件在两次注册之间生效。
+            reg_thread = threading.Thread(target=run_register, daemon=True)
+            reg_thread.start()
+            reg_thread.join()  # 之后 futures 不再增长，可安全遍历
+        for f in futures:
+            f.result()  # run_group 自捕获业务异常；这里只等待
+        ex.shutdown(wait=True)
+    except BaseException:  # KeyboardInterrupt: 取消未开始的项，通知注册线程停止
+        stop.set()
+        # ponytail: 线程池线程非 daemon（3.9+ 解释器退出前会 join），在飞的上传/poll
+        # 会跑完才真正退出；要即时中止需给 poll_task 加协作式 stop 检查，暂不做。
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+
+    results = [results_by_idx[i] for i in sorted(results_by_idx)]
+    if refresh_used and used:
         # ponytail: ElevenLabs debits credits asynchronously — this refresh can race
         # the debit and record a still-high remaining; margin + next-run refresh absorb the lag.
-        account_remaining(a, store, force=True)
+        refresh_many(store, used)
     return results, used
 
 
@@ -1191,11 +1301,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     if register_count and not has_temp_email_config(config_path):
         raise SystemExit(f"need {register_count} more account(s) but [temp_email] not configured")
 
-    # register the exact shortfall up-front, then bind NEW#k slots -> registered accounts
-    resolved = resolve_plan(plan, register_shortfall(store, register_count))
+    # pipelined: existing-account items start now; the shortfall registers alongside
     single = len(files) == 1
-    results, _ = run_plan(resolved, cfg, store, config_path,
-                          output_for=lambda _inp: args.output if single else None)
+    results, _ = run_plan_pipelined(plan, cfg, store, config_path,
+                                    output_for=lambda _inp: args.output if single else None,
+                                    register_count=register_count)
     try:
         refill_pool(store, config_path)
     except KeyboardInterrupt:
@@ -1323,15 +1433,14 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
                     entry["ok"] = False
                     entry["skipped"] = True
 
-    # register the exact shortfall, bind NEW#k slots -> registered accounts
-    resolved = resolve_plan(plan, register_shortfall(store, register_count))
     entry_by_input = {e["input"]: e for e in entries}
 
-    # --- transcribe each chunk (cut-failed entries skip upload) ----------------
-    resolved = [(inp, acct) for inp, acct in resolved
-                if entry_by_input[inp]["ok"] is not False]
-    results, _ = run_plan(resolved, cfg, store, config_path,
-                          output_for=lambda inp: str(entry_by_input[inp]["output"]))
+    # --- transcribe each chunk pipelined (cut-failed entries skip upload) ------
+    plan = [(inp, target) for inp, target in plan
+            if entry_by_input[inp]["ok"] is not False]
+    results, _ = run_plan_pipelined(plan, cfg, store, config_path,
+                                    output_for=lambda inp: str(entry_by_input[inp]["output"]),
+                                    register_count=register_count)
     for inp, email, status, detail in results:  # merge (below) reads entry["ok"]
         entry_by_input[inp]["ok"] = status == "OK"
     try:
@@ -1385,6 +1494,8 @@ def _selfcheck() -> int:
     cfg = load_config(pathlib.Path("config.example.toml"))
     assert cfg["include_subtitles"] is True, "script default include_subtitles must be ON"
     assert cfg["tag_audio_events"] is True
+    assert cfg["max_concurrency"] == 4 and cfg["stagger_secs"] == 2.0  # 并发默认值（AC4）
+    assert DEFAULTS["max_concurrency"] == 4 and DEFAULTS["stagger_secs"] == 2.0
     assert resolve_language("auto") is None
     assert resolve_language("English") == "eng"
     assert resolve_language("eng") == "eng"
@@ -1459,8 +1570,66 @@ def _selfcheck() -> int:
     r3 = pack_bins([("fu", None)], [("a", 1000)], 1.0, 10000)
     assert r3["register_count"] == 1 and dict(r3["assignments"])["fu"] == "NEW#0"
     assert r3["bins"][-1]["use"] == 0 and r3["bins"][-1]["before"] == 0  # unknown req 不计 use
-    # register_shortfall(store, 0): 不触发注册、不落盘（零成本冒烟）
-    assert register_shortfall({"accounts": [], "active": None}, 0) == []
+    # --- 并发流水线纯逻辑（AC7；全部离线） -------------------------------------
+    # group_plan: existing 按账号聚组保序、NEW#k 按槽位分组
+    p1, p2, p3 = (pathlib.Path(n) for n in ("p1.mp3", "p2.mp3", "p3.mp3"))
+    egroups, pending = group_plan([(p1, aa), (p2, bb), (p3, aa), (pathlib.Path("p4.mp3"), "NEW#0")])
+    assert [(acct["email"], [i for i, _ in items]) for acct, items in egroups] == \
+        [("a", [0, 2]), ("b", [1])], "同账号聚为一组且保 plan 序"
+    assert {k: [i for i, _ in v] for k, v in pending.items()} == {0: [3]}
+
+    # stagger 闸：0 短路；两次取号间隔 >= stagger_secs（注入时钟，无真实 sleep）
+    global _GATE_NEXT, REGISTER_LOG, TRANSCRIBE_LOG
+    _GATE_NEXT = 0.0
+    assert _stagger_wait(0) == 0.0
+    slept: list[float] = []
+    w1 = _stagger_wait(2.0, clock=lambda: 100.0, sleep=slept.append)
+    w2 = _stagger_wait(2.0, clock=lambda: 100.0, sleep=slept.append)
+    assert w1 == 0.0 and w2 == 2.0 and slept == [0.0, 2.0], (w1, w2, slept)
+    _GATE_NEXT = 0.0
+
+    # run_plan_pipelined: 假账号 + transcribe 桩；注册第 2 个失败 → 该槽位 FAIL，
+    # 已提交组与已注册槽位不受影响；results 保 plan 序（R7 流水线新分支）
+    global ACCOUNTS_PATH
+    real_accounts_path = ACCOUNTS_PATH
+    ACCOUNTS_PATH = pathlib.Path(tempfile.mkdtemp(prefix="stt-selfcheck-")) / "accounts.json"
+    try:
+        reg_calls: list[int] = []
+
+        def reg_stub():
+            reg_calls.append(1)
+            if len(reg_calls) == 1:
+                return {"email": "n0", "invalid": False, "created_at": now,
+                        "credits_known": {"limit": 10000, "count": 0, "fetched_at": now}}
+            raise RuntimeError("boom")
+
+        def trans_stub(inp, _cfg, account, _store, _cfgpath, output):
+            return pathlib.Path(str(inp) + ".srt")
+
+        pstore = {"accounts": [dict(aa)], "active": "a"}
+        pplan = [(p1, pstore["accounts"][0]), (p2, "NEW#0"), (p3, "NEW#1")]
+        done_flags: list[bool] = []
+        plog: list[str] = []
+        TRANSCRIBE_LOG = REGISTER_LOG = plog.append  # 静音测试期间的进度行
+        try:
+            res, pused = run_plan_pipelined(
+                pplan, {"max_concurrency": 2, "stagger_secs": 0}, pstore,
+                pathlib.Path("config.example.toml"), output_for=lambda _i: None,
+                register_count=2, register_fn=reg_stub, transcribe_fn=trans_stub,
+                refresh_used=False, on_done=lambda _i, ok: done_flags.append(ok))
+        finally:
+            TRANSCRIBE_LOG = REGISTER_LOG = None
+        assert any("注册失败" in l for l in plog), plog
+        assert [r[0] for r in res] == [p1, p2, p3], "results 按 plan 原顺序聚合"
+        assert res[0][2] == "OK" and res[1][2] == "OK" and res[1][1] == "n0", res
+        assert res[2][2] == "FAIL" and "注册失败" in res[2][3], "未注册槽位标 FAIL 带原因"
+        assert {a["email"] for a in pstore["accounts"]} == {"a", "n0"}, "注册成功的账号已入 store"
+        assert ACCOUNTS_PATH.exists(), "注册成功即落盘"
+        assert len(done_flags) == 3 and done_flags.count(False) == 1, done_flags
+        assert {a.get("email") for a in pused} == {"a", "n0"}
+    finally:
+        shutil.rmtree(ACCOUNTS_PATH.parent, ignore_errors=True)
+        ACCOUNTS_PATH = real_accounts_path
 
     # --- audio_split pure logic (offline; AC7) --------------------------------
     # default_chunk_secs: chunk fits one fresh account within margin
@@ -1498,7 +1667,6 @@ def _selfcheck() -> int:
     assert audio_split.merge_txt([(0.0, "alpha"), (5.0, "beta")]) == "alpha\n\nbeta\n"
 
     # REGISTER_LOG hook: collector receives _rlog lines; None default restored
-    global REGISTER_LOG
     got: list[str] = []
     REGISTER_LOG = got.append
     try:
@@ -1508,7 +1676,6 @@ def _selfcheck() -> int:
     assert got == ["hook-test"], got
 
     # TRANSCRIBE_LOG hook: same contract as REGISTER_LOG
-    global TRANSCRIBE_LOG
     tgot: list[str] = []
     TRANSCRIBE_LOG = tgot.append
     try:

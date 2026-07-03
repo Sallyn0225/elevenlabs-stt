@@ -10,6 +10,8 @@ vocab = []                   # key terms, e.g. ["Maj3r", "V社"]
 export_format = "srt"        # srt | vtt | txt | json | html | pdf | docx
 poll_timeout_secs = 600      # max seconds to wait for transcription
 # show_cost = false          # print estimated credit cost before upload
+max_concurrency = 4          # 跨账号并发转录上限；1 = 回退串行
+stagger_secs = 2.0           # 相邻上传起始的最小间隔（秒），降低同 IP 突发；0 = 关闭错峰
 
 # Multi-account pool & auto-registration. Leave commented to use a single
 # `stt login`-imported account (graceful single-account mode).

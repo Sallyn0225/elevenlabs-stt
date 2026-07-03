@@ -359,9 +359,12 @@ def do_save_config(temp_email: dict, pool_target) -> dict:
 
 # In-memory transcribe progress, polled by GET /api/transcribe/progress.
 # ponytail: same pattern as _REG_PROGRESS — plain dict + GIL-atomic appends;
-# _TRANS_LOCK only guards the active check-and-set. One transcribe run at a time.
-_TRANS_PROGRESS: dict = {"active": False, "lines": [], "done": 0, "total": 0,
-                         "file": None, "stage": None, "error": None}
+# _TRANS_LOCK guards the running check-and-set plus the concurrent bits
+# (active task list mutation, done += 1). One transcribe run at a time.
+# "active" is the concurrent task list [{file, stage}]; top-level "stage"
+# covers the serial phases (刷新额度/切分/合并).
+_TRANS_PROGRESS: dict = {"running": False, "lines": [], "done": 0, "total": 0,
+                         "active": [], "stage": None, "error": None}
 _TRANS_LOCK = threading.Lock()
 
 
@@ -376,10 +379,10 @@ def do_transcribe(upload_ids: list[str], params: dict,
                   allowed: list[str] | None = None) -> dict:
     """Single-flight guard + progress hooks around _transcribe_impl."""
     with _TRANS_LOCK:
-        if _TRANS_PROGRESS["active"]:
+        if _TRANS_PROGRESS["running"]:
             return {"error": "转录已在进行中"}
-        _TRANS_PROGRESS.update(active=True, lines=[], done=0, total=0,
-                               file=None, stage=None, error=None)
+        _TRANS_PROGRESS.update(running=True, lines=[], done=0, total=0,
+                               active=[], stage=None, error=None)
     # 转录期间借用 REGISTER_LOG：缺口注册的 _rlog 行也进同一日志流
     stt.TRANSCRIBE_LOG = stt.REGISTER_LOG = _trans_log
     try:
@@ -395,7 +398,7 @@ def do_transcribe(upload_ids: list[str], params: dict,
         raise
     finally:
         stt.TRANSCRIBE_LOG = stt.REGISTER_LOG = None
-        _TRANS_PROGRESS["active"] = False
+        _TRANS_PROGRESS["running"] = False
 
 
 def _transcribe_impl(upload_ids: list[str], params: dict,
@@ -501,35 +504,38 @@ def _transcribe_impl(upload_ids: list[str], params: dict,
             return {"error": stt.manual_shortfall_msg(
                 register_count, "；手动模式不会自动注册，请增选账号或清空选择回到自动分配")}
 
-        # --- register the confirmed shortfall (mirrors _transcribe_split) --
-        new_accounts: list[dict] = []
+        # --- confirmation gates before any registration side effect --------
         if register_count:
-            _TRANS_PROGRESS["stage"] = "注册账号"
             if not confirm_register:  # UI confirms first; stale previews bounce here
                 return {"needRegister": register_count}
             if not stt.has_temp_email_config(CONFIG_PATH):
                 return {"error": f"当前账号池不足，还需 {register_count} 个新账号，"
                                  f"但 [temp_email] 未配置。请先在「启动注册机」中完成配置。"}
-            try:
-                new_accounts = stt.register_shortfall(store, register_count)
-            except (Exception, SystemExit) as e:  # 已注册账号已由 helper 落盘
-                return {"error": f"注册新账号失败：{e!r}", "state": build_state()}
-        resolved = stt.resolve_plan(plan, new_accounts)
         entry_by_input = {e["input"]: e for e in entries}
 
-        # --- transcribe each piece -----------------------------------------
-        def _on_start(i, total, inp, account):
-            _TRANS_PROGRESS["file"] = entry_by_input[inp]["parent"]["name"]
-            _TRANS_PROGRESS["stage"] = "转录中"
+        # --- transcribe pipelined: existing accounts start now, the shortfall
+        # registers alongside; registration failures surface as FAIL rows ----
+        _TRANS_PROGRESS["stage"] = "转录中"
+
+        def _on_active(inp, stage):
+            entry = entry_by_input[inp]
+            # split chunks show their partNN name; whole files show the upload name
+            fname = inp.name if entry["parent"]["split"] else entry["parent"]["name"]
+            with _TRANS_LOCK:
+                acts = _TRANS_PROGRESS["active"]
+                acts[:] = [t for t in acts if t.get("key") != str(inp)]
+                if stage:
+                    acts.append({"key": str(inp), "file": fname, "stage": stage})
 
         def _on_done(inp, ok):
-            _TRANS_PROGRESS["done"] += 1
+            with _TRANS_LOCK:  # += 非 GIL 原子，并发 worker 都会回调
+                _TRANS_PROGRESS["done"] += 1
 
-        results_raw, _ = stt.run_plan(
-            resolved, cfg, store, CONFIG_PATH,
+        results_raw, _ = stt.run_plan_pipelined(
+            plan, cfg, store, CONFIG_PATH,
             output_for=lambda inp: (str(entry_by_input[inp]["output"])
                                     if entry_by_input[inp]["output"] else None),
-            on_start=_on_start, on_done=_on_done)
+            register_count=register_count, on_done=_on_done, on_active=_on_active)
         for inp, email, status, detail in results_raw:  # merge 段读 ok/out/err/email
             entry = entry_by_input[inp]
             entry.update(ok=status == "OK", email=email)

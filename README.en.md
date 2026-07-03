@@ -74,6 +74,8 @@ Copy `config.example.toml` → `config.toml` for persistent defaults; CLI flags 
 | `export_format` | `srt`/`vtt`/`txt`/`json`/`html`/`pdf`/`docx` | `srt` |
 | `poll_timeout_secs` | Poll timeout in seconds | `600` |
 | `show_cost` | Print estimated credit cost before upload | `false` |
+| `max_concurrency` | Max concurrent transcriptions across accounts; `1` = serial fallback | `4` |
+| `stagger_secs` | Minimum gap (seconds) between consecutive upload starts; `0` = no staggering | `2.0` |
 
 ## Local Web UI (optional)
 
@@ -83,7 +85,7 @@ Beyond the CLI, `web.py` spins up a local web page using the standard library, r
 python web.py            # opens http://127.0.0.1:8756
 ```
 
-- **Transcribe page**: drag/multi-select audio → the browser measures duration and estimates credits → auto-allocates accounts by remaining credits (best-fit) → "Start" does the real upload, polling, and export, auto-downloading subtitles when done. The accounts section includes a collapsed-by-default **"Advanced · manually pick accounts"** panel: checking accounts restricts allocation to the selected set (accounts too small for the batch are greyed out); manual mode errors out instead of auto-registering when credits fall short, and clearing the selection returns to auto-allocation. While transcribing, the bottom bar shows **real step-by-step progress** (done/total counter, current file and stage, latest log line), with an expandable full scrolling log.
+- **Transcribe page**: drag/multi-select audio → the browser measures duration and estimates credits → auto-allocates accounts by remaining credits (best-fit) → "Start" does the real upload, polling, and export, auto-downloading subtitles when done. The accounts section includes a collapsed-by-default **"Advanced · manually pick accounts"** panel: checking accounts restricts allocation to the selected set (accounts too small for the batch are greyed out); manual mode errors out instead of auto-registering when credits fall short, and clearing the selection returns to auto-allocation. While transcribing, the bottom bar shows **real step-by-step progress** (done/total counter, a multi-line **active-task list** with each in-flight file and stage, latest log line), with an expandable full scrolling log.
 - **Accounts page**: reads `accounts.json`, with search/sort/multi-select/pagination and back-to-top, real credit refresh (selected accounts only, fetched concurrently), delete, and JSON export.
 - **Log in**: a dialog takes email + password, logs in via Firebase REST directly and saves the token to `accounts.json` (no browser needed).
 - **Start the registrar**: a dialog exposes the full parameters (mapping to `config.toml → [temp_email]` and the target full-account count); "Save" writes back to `config.toml` (two-way sync with the config file); "Start batch create" saves the config first, then runs a real `pool warm` batch registration. Registration emits step-by-step progress logs: the CLI (`stt pool warm` and transcribe-triggered auto-registration) prints them to stderr, and the Web UI register dialog shows them live with a done/target counter.
@@ -150,7 +152,7 @@ With `[temp_email]` and `[accounts]` configured, the script can maintain multipl
 - estimates each file's credit cost (from duration; a file with unknown duration conservatively claims its own fresh account);
 - **packs onto existing accounts first**: using best-fit bin-packing, multiple files share one account as long as its remaining credits (× `selection_margin`) cover them — draining near-empty accounts first and preserving the big ones;
 - **registers only the shortfall** (缺多少注册多少): only files that fit no existing account trigger new registrations, and exactly that many — existing accounts come first, newly registered accounts last;
-- prints the plan first (`file → account/NEW#k`, `need new: N`), then transcribes sequentially, skipping a failed file and continuing, and finally prints an OK/FAIL summary; exit code is non-zero if any file failed.
+- prints the plan first (`file → account/NEW#k`, `need new: N`), then transcribes **concurrently across accounts**: tasks on the same account run serially, different accounts run in parallel (capped by `max_concurrency`, default 4; consecutive upload starts are staggered by `stagger_secs` seconds). Any shortfall is handled as a **register-transcribe pipeline**: tasks bound to existing accounts start immediately, and each newly registered account's tasks start as soon as that registration finishes; a mid-run registration failure only FAILs the tasks bound to still-unregistered slots while in-flight tasks finish normally. A failed file is skipped and the run continues; an OK/FAIL summary prints at the end, exit code non-zero if anything failed. `max_concurrency = 1` restores the old serial behaviour.
 
 `--dry-run` prints the plan and exits without registering or uploading. If `register_count > 0` but `[temp_email]` is not configured, it errors up-front (naming how many accounts are short) before doing any work.
 

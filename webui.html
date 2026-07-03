@@ -328,9 +328,13 @@ function actionBarHTML(totalNeed,allocCount){
   const logPanel=(tp&&S.transLogOpen)?`<div style="max-width:1024px;margin:0 auto;padding:10px 24px 0"><div data-translog style="height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--muted2);padding:10px 12px;font-size:12px;line-height:1.7" class="mono">
       ${(tp.lines&&tp.lines.length)?tp.lines.map(l=>`<div>${esc(l)}</div>`).join(''):'<div style="color:var(--mut-fg)">等待日志…</div>'}
       ${tp.error?`<div style="color:var(--red)">${esc(tp.error)}</div>`:''}</div></div>`:'';
-  let inner;
+  let inner,actPanel='';
   if(S.status==='running'){
-    const cur=tp?[tp.file,tp.stage].filter(Boolean).join(' · '):'';
+    // 并发活动任务列表：active = [{file, stage}] 多行渲染;串行阶段回落到顶层 stage
+    const acts=(tp&&tp.active)?tp.active:[];
+    const cur=acts.length?`${acts.length} 个任务进行中`:(tp&&tp.stage?tp.stage:'');
+    if(acts.length)actPanel=`<div style="max-width:1024px;margin:0 auto;padding:10px 24px 0;display:flex;flex-direction:column;gap:3px">
+      ${acts.map(a=>`<div class="mono" style="font-size:12px;color:var(--mut-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:8px;vertical-align:1px"></span>${esc(a.file)} — ${esc(a.stage)}</div>`).join('')}</div>`;
     const last=(tp&&tp.lines&&tp.lines.length)?tp.lines[tp.lines.length-1]:'';
     inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg);min-width:0">
         <span style="flex:none;width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>
@@ -362,7 +366,7 @@ function actionBarHTML(totalNeed,allocCount){
     inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut-fg)"><span>预计消耗</span><b style="color:var(--fg)" class="mono">${fmt(totalNeed)}</b><span>credits</span><span style="opacity:.5">·</span><span>覆盖 ${allocCount} 个账号</span></div>
       <button data-act="start" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>开始转录</button>`;
   }
-  return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg);border-top:1px solid var(--border)">${logPanel}<div style="max-width:1024px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px">${inner}</div></div>`;
+  return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg);border-top:1px solid var(--border)">${actPanel}${logPanel}<div style="max-width:1024px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px">${inner}</div></div>`;
 }
 
 // ----------------------------------------------------------- accounts view
