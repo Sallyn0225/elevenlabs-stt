@@ -40,8 +40,12 @@ const S = {
   params:{language:'auto',languageName:'自动检测',format:'srt',vocab:['ElevenLabs'],
           tag_audio_events:true,include_subtitles:true,no_verbatim:false,
           use_speaker_library:false,show_cost:false},
-  keyterm:'', langOpen:false, langQuery:'', acctMode:'auto', mode:'batch',
-  plan:null, status:'idle', phase:'', results:[],
+  keyterm:'', langOpen:false, langQuery:'', mode:'batch',
+  plan:null, status:'idle', results:[],
+  // 高级 · 手动指定账号：allowedEmails 空数组 = 自动分配（默认）
+  acctPanelOpen:false, allowedEmails:[],
+  // /api/transcribe/progress payload + 底栏「详情」日志面板开关
+  transProgress:null, transLogOpen:false,
   // accounts view
   query:'', sortKey:'created', sortDir:'desc', sortOpen:false,
   selected:[], revealed:[],
@@ -193,6 +197,34 @@ function allocHTML(){
   }).join('');
 }
 
+// 高级 · 手动指定账号（默认折叠）：勾选 = 限定分配候选集,交互样式复用切分页的 toggleAdv 折叠块
+function acctPanelHTML(){
+  const cands=((S.data&&S.data.accounts)||[]).filter(a=>!a.invalid);
+  const nSel=S.allowedEmails.length;
+  const minNeed=S.plan?S.plan.minNeed:null;
+  const rows=cands.map(a=>{
+    const on=S.allowedEmails.includes(a.email);
+    const low=minNeed!=null&&a.rem!=null&&a.rem<minNeed;   // 弱判据,plan.error 兜底
+    const dis=low&&!on;                                    // 已勾选的仍可取消
+    return `<div ${dis?'':`data-act="toggleAllowed" data-arg="${esc(a.email)}"`} style="display:flex;align-items:center;gap:11px;padding:8px 12px;border-radius:6px;${dis?'opacity:.45;cursor:not-allowed':'cursor:pointer'}">
+      <div style="${cbBox(on)}">${CHECK}</div>
+      <span class="mono" style="flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.email)}</span>
+      ${low?'<span style="flex:none;font-size:11px;color:var(--red)">额度不足</span>':''}
+      <span class="mono" style="flex:none;font-size:12px;color:var(--mut-fg)">剩余 ${a.rem!=null?fmt(a.rem):'—'}</span>
+    </div>`;}).join('');
+  return `<div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
+    <div data-act="toggleAcctPanel" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;background:var(--muted2)">
+      <span style="font-size:13px;font-weight:500">高级 · 手动指定账号 <span style="font-size:11px;color:var(--mut-fg);font-weight:400">· 限定分配候选集</span></span>
+      <span style="display:flex;align-items:center;gap:9px"><span style="font-size:11px;color:${nSel?'var(--amber)':'var(--mut-fg)'};border:1px solid var(--border);border-radius:5px;padding:2px 8px">${nSel?`已选 ${nSel} 个账号`:'自动分配'}</span><span style="color:var(--mut-fg);font-size:13px">${S.acctPanelOpen?'▴':'▾'}</span></span>
+    </div>
+    ${S.acctPanelOpen?`<div style="border-top:1px solid var(--border);padding:8px;display:flex;flex-direction:column;gap:2px">
+      <div style="padding:4px 12px 8px;font-size:11.5px;color:var(--mut-fg)">手动模式下额度不足会直接报错，不会自动注册新账号；清空勾选即回到自动分配。</div>
+      ${rows||'<div style="padding:8px 12px;font-size:12.5px;color:var(--mut-fg)">暂无可用账号</div>'}
+      ${nSel?`<div data-act="clearAllowed" style="padding:8px 12px;font-size:12px;color:var(--mut-fg);cursor:pointer;text-decoration:underline;text-underline-offset:3px">清空选择（回到自动分配）</div>`:''}
+    </div>`:''}
+  </div>`;
+}
+
 function transcribeView(){
   const p=S.plan||{};
   const totalNeed=p.totalNeed||0, totalCredits=p.totalCredits||0, allocCount=(p.alloc||[]).length;
@@ -253,6 +285,7 @@ function transcribeView(){
 
     <div style="display:flex;flex-direction:column;gap:16px">
       <div><h2 style="margin:0;font-size:16px;font-weight:600">使用的账号</h2><p style="margin:6px 0 0;font-size:13px;color:var(--mut-fg)">按剩余额度自动分配,先排空快用完的账号</p></div>
+      ${acctPanelHTML()}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
         <div style="padding:15px 17px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
           <div style="font-size:12px;color:var(--mut-fg)">预计总消耗</div>
@@ -289,10 +322,28 @@ function transcribeView(){
 }
 
 function actionBarHTML(totalNeed,allocCount){
+  const tp=S.transProgress;
+  const detailBtn=`<span data-act="toggleTransLog" style="flex:none;cursor:pointer;text-decoration:underline;text-underline-offset:3px">详情 ${S.transLogOpen?'▴':'▾'}</span>`;
+  // 完整日志面板：转录期间实时追加,失败后保留（S.transProgress 不清空）
+  const logPanel=(tp&&S.transLogOpen)?`<div style="max-width:1024px;margin:0 auto;padding:10px 24px 0"><div data-translog style="height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--muted2);padding:10px 12px;font-size:12px;line-height:1.7" class="mono">
+      ${(tp.lines&&tp.lines.length)?tp.lines.map(l=>`<div>${esc(l)}</div>`).join(''):'<div style="color:var(--mut-fg)">等待日志…</div>'}
+      ${tp.error?`<div style="color:var(--red)">${esc(tp.error)}</div>`:''}</div></div>`:'';
   let inner;
   if(S.status==='running'){
-    inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg)"><span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>${esc(S.phase||'转录中 · 上传并轮询任务状态…')}</div>
-      <button style="padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:default">处理中…</button>`;
+    const cur=tp?[tp.file,tp.stage].filter(Boolean).join(' · '):'';
+    const last=(tp&&tp.lines&&tp.lines.length)?tp.lines[tp.lines.length-1]:'';
+    inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg);min-width:0">
+        <span style="flex:none;width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>
+        <span class="mono" style="flex:none;color:var(--fg)">已完成 ${tp?tp.done||0:0}/${tp?tp.total||0:0}</span>
+        ${cur?`<span style="flex:none;opacity:.5">·</span><span style="flex:none;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(cur)}</span>`:''}
+        ${last?`<span style="flex:none;opacity:.5">·</span><span class="mono" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(last)}</span>`:''}
+        ${detailBtn}</div>
+      <button style="flex:none;padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:default">处理中…</button>`;
+  } else if(tp&&tp.error&&S.status!=='done'){
+    // 失败后：错误 + 日志保留在底栏,不只弹 toast
+    inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--red);min-width:0">
+        <span style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(tp.error)}</span>${detailBtn}</div>
+      <button data-act="start" style="flex:none;display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer">重试转录</button>`;
   } else if(S.status==='done'){
     const ok=S.results.filter(r=>r.ok).length;
     inner=`<div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--fg)"><span style="width:20px;height:20px;border-radius:50%;background:var(--green);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px">✓</span>转录完成 · 已自动下载 ${ok} 个字幕文件</div>
@@ -300,6 +351,10 @@ function actionBarHTML(totalNeed,allocCount){
         <button data-act="reset" style="padding:10px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;font-weight:500;cursor:pointer">重新开始</button>
         <button data-act="downloadAll" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer">全部下载</button>
       </div>`;
+  } else if(S.plan&&S.plan.error){
+    // 手动候选集装不下等预览错误：禁用开始按钮（同 MERGEABLE 灰按钮模式）
+    inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--red);min-width:0"><span style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(S.plan.error)}</span></div>
+      <button style="flex:none;display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:not-allowed">开始转录</button>`;
   } else if(splitFiles().length&&!MERGEABLE.includes(S.params.format)){
     inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--amber)">${S.params.format.toUpperCase()} 格式不支持长音频切分合并，请改用 SRT / VTT / TXT</div>
       <button style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:not-allowed">开始转录</button>`;
@@ -307,7 +362,7 @@ function actionBarHTML(totalNeed,allocCount){
     inner=`<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut-fg)"><span>预计消耗</span><b style="color:var(--fg)" class="mono">${fmt(totalNeed)}</b><span>credits</span><span style="opacity:.5">·</span><span>覆盖 ${allocCount} 个账号</span></div>
       <button data-act="start" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>开始转录</button>`;
   }
-  return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg);border-top:1px solid var(--border)"><div style="max-width:1024px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px">${inner}</div></div>`;
+  return `<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg);border-top:1px solid var(--border)">${logPanel}<div style="max-width:1024px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px">${inner}</div></div>`;
 }
 
 // ----------------------------------------------------------- accounts view
@@ -728,6 +783,7 @@ function render(){
   app.innerHTML = headerHTML() + view + modalsHTML();
   updateTopBtn();
   const lg=document.querySelector('[data-reglog]'); if(lg)lg.scrollTop=lg.scrollHeight; // 注册日志区滚动到底
+  const tl=document.querySelector('[data-translog]'); if(tl)tl.scrollTop=tl.scrollHeight; // 转录日志区滚动到底
 }
 
 // back-to-top: a single persistent button outside #app, shown on the accounts page
@@ -750,7 +806,8 @@ async function refreshPlan(){
   const ready=S.files.filter(f=>!f.uploading);
   if(!ready.length){ S.plan=null; return; }
   S.plan=await api('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({files:ready.map(f=>({id:f.id,name:f.name,duration:f.duration}))})});
+    body:JSON.stringify({files:ready.map(f=>({id:f.id,name:f.name,duration:f.duration})),
+      allowedEmails:S.allowedEmails})});
   render();
 }
 
@@ -811,9 +868,16 @@ async function runSplitExec(){
   }catch(e){ clearInterval(timer); S.tool.status='idle'; render(); toast('切分失败'); }
 }
 
+// 转录进度轮询：转录 POST 阻塞期间每秒拉一次 /api/transcribe/progress
+// （旧后端无此端点 → catch 静默,底栏退化为纯 spinner）
+async function pollTransProgress(){
+  try{S.transProgress=await api('/api/transcribe/progress');render();}catch(e){}
+}
+
 async function startTranscribe(){
   const uploads=S.files.filter(f=>f.id&&!f.uploading).map(f=>f.id);
   if(!uploads.length){ toast('没有已就绪的文件'); return; }
+  if(S.plan&&S.plan.error){ toast(S.plan.error); return; } // 手动候选集装不下等预览错误
   // 执行前确认:切分方案 + 注册缺口合并为一个弹窗,取消则零副作用
   const splits=((S.plan&&S.plan.files)||[]).filter(x=>x.segCount);
   const reg=(S.plan&&S.plan.registerCount)||0;
@@ -825,23 +889,21 @@ async function startTranscribe(){
     if(!confirm(parts.join('，')+'，是否继续？'))return;
     confirmed=true;
   }
-  S.status='running'; render();
-  // 阶段文案纯装饰轮换(与切分工具页同模式),真实进度在后端阻塞请求里
-  const phases=splits.length?['切分音频…',...(reg?['注册账号…']:[]),'转录分段…','合并字幕…']:null;
-  let timer=null;
-  if(phases){let pi=0;S.phase=phases[0];timer=setInterval(()=>{pi=(pi+1)%phases.length;S.phase=phases[pi];render();},2500);}
+  S.status='running'; S.transProgress=null; render();
+  const timer=setInterval(pollTransProgress,1000);   // 真实进度轮询(同 runRegister 模式)
   const send=flag=>api('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({uploads,params:S.params,confirmRegister:flag})});
+    body:JSON.stringify({uploads,params:S.params,confirmRegister:flag,allowedEmails:S.allowedEmails})});
   let res;
   try{
     res=await send(confirmed);
     if(res.needRegister){   // 预览与实际余额有偏差时的后端兜底
       if(confirm(`需注册 ${res.needRegister} 个新账号，是否继续？`)) res=await send(true);
-      else { S.status='idle'; render(); return; }
+      else { clearInterval(timer); S.status='idle'; S.transProgress=null; render(); return; }
     }
-  }catch(e){ S.status='idle'; render(); toast('转录请求失败'); return; }
-  finally{ if(timer)clearInterval(timer); S.phase=''; }
-  if(res.error){ if(res.state)S.data=res.state; S.status='idle'; render(); toast(res.error); return; } // res.state: 注册中途失败时后端带回已注册账号的最新池状态
+  }catch(e){ clearInterval(timer); S.status='idle'; render(); toast('转录请求失败'); return; }
+  clearInterval(timer);
+  await pollTransProgress();   // 补齐尾部日志(含失败原因)
+  if(res.error){ if(res.state)S.data=res.state; S.status='idle'; render(); toast(res.error); return; } // 失败:S.transProgress 保留,日志面板可继续查看
   // map results back onto file entries + auto-download
   S.results=res.results||[];
   S.results.forEach(r=>{
@@ -851,6 +913,7 @@ async function startTranscribe(){
     if(!r.ok) toast(`${r.name} 失败`);
   });
   if(res.state) S.data=res.state;
+  S.transProgress=null; S.transLogOpen=false;   // 成功:清空进度
   S.status='done'; render();
 }
 
@@ -879,7 +942,12 @@ document.addEventListener('click',e=>{
     pickLang(){S.params.language=el.dataset.code;S.params.languageName=el.dataset.name;S.langOpen=false;render();refreshPlan();},
     pickFormat(){S.params.format=arg;render();},
     removeTerm(){S.params.vocab.splice(+arg,1);render();},
-    start(){startTranscribe();}, reset(){S.files=[];S.plan=null;S.status='idle';S.results=[];render();},
+    start(){startTranscribe();}, reset(){S.files=[];S.plan=null;S.status='idle';S.results=[];S.transProgress=null;S.transLogOpen=false;render();},
+    // 高级 · 手动指定账号
+    toggleAcctPanel(){S.acctPanelOpen=!S.acctPanelOpen;render();},
+    toggleAllowed(){S.allowedEmails=S.allowedEmails.includes(arg)?S.allowedEmails.filter(x=>x!==arg):[...S.allowedEmails,arg];render();refreshPlan();},
+    clearAllowed(){S.allowedEmails=[];render();refreshPlan();},
+    toggleTransLog(){S.transLogOpen=!S.transLogOpen;render();},
     download(){const f=S.files[+arg];if(f&&f._content)downloadB64(f.download,f._content);},
     downloadAll(){S.results.filter(r=>r.ok&&r.content).forEach(r=>downloadB64(r.download,r.content));},
     // accounts

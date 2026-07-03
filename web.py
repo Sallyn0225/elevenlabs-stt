@@ -115,8 +115,11 @@ def build_state() -> dict:
     }
 
 
-def compute_plan(items: list[dict]) -> dict:
+def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
     """items: [{id, name, duration}] -> allocation preview.
+
+    allowed 非空时把候选账号限定为所列邮箱（手动模式,未知邮箱静默忽略——预览是弱校验,
+    /api/transcribe 里的 stt.filter_accounts 才是强校验）。
 
     ponytail: mirrors stt.allocate's best-fit but reads cached remaining only —
     a preview fires on every file add and must not network or write accounts.json.
@@ -132,6 +135,10 @@ def compute_plan(items: list[dict]) -> dict:
     chunk_secs = audio_split.default_chunk_secs(thr, stt.CREDITS_PER_SEC, margin)
     store = stt.load_accounts()
     accounts = [a for a in store["accounts"] if not a.get("invalid")]
+    manual = bool(allowed)
+    if manual:
+        allowed_set = set(allowed)
+        accounts = [a for a in accounts if a.get("email") in allowed_set]
 
     need = lambda req: None if req is None else int(req * margin) + 1
     costs: list[tuple[str, int | None]] = []
@@ -198,9 +205,15 @@ def compute_plan(items: list[dict]) -> dict:
     alloc = [{"email": b.email, "files": b.files, "count": len(b.files),
               "useSum": b.use, "remBefore": b.before, "remAfter": b.before - b.use,
               "isNew": b.is_new} for b in used]
-    return {"alloc": alloc, "registerCount": register_count,
-            "totalNeed": total_need, "totalCredits": total_credits,
-            "files": finfo, "oversize": oversize}
+    # 本批最小分配单元的 need：前端灰显"装不下最小段"的账号（弱判据,plan.error 兜底）
+    min_need = min((need(req) for _, req in costs if req is not None), default=None)
+    out = {"alloc": alloc, "registerCount": register_count,
+           "totalNeed": total_need, "totalCredits": total_credits,
+           "files": finfo, "oversize": oversize, "minNeed": min_need}
+    if manual and register_count:
+        out["error"] = (f"所选账号额度不足，还差 {register_count} 个新账号；"
+                        f"手动模式不会自动注册，请增选账号或清空选择回到自动分配")
+    return out
 
 
 # ---------------------------------------------------------------- actions
@@ -396,8 +409,49 @@ def do_save_config(temp_email: dict, pool_target) -> dict:
     return build_state()
 
 
+# In-memory transcribe progress, polled by GET /api/transcribe/progress.
+# ponytail: same pattern as _REG_PROGRESS — plain dict + GIL-atomic appends;
+# _TRANS_LOCK only guards the active check-and-set. One transcribe run at a time.
+_TRANS_PROGRESS: dict = {"active": False, "lines": [], "done": 0, "total": 0,
+                         "file": None, "stage": None, "error": None}
+_TRANS_LOCK = threading.Lock()
+
+
+def _trans_log(msg: str) -> None:
+    _TRANS_PROGRESS["lines"].append(msg)
+    if len(_TRANS_PROGRESS["lines"]) > 1000:  # 转录日志含逐 pct 行,上限比注册高
+        del _TRANS_PROGRESS["lines"][:-1000]
+
+
 def do_transcribe(upload_ids: list[str], params: dict,
-                  confirm_register: bool = False) -> dict:
+                  confirm_register: bool = False,
+                  allowed: list[str] | None = None) -> dict:
+    """Single-flight guard + progress hooks around _transcribe_impl."""
+    with _TRANS_LOCK:
+        if _TRANS_PROGRESS["active"]:
+            return {"error": "转录已在进行中"}
+        _TRANS_PROGRESS.update(active=True, lines=[], done=0, total=0,
+                               file=None, stage=None, error=None)
+    # 转录期间借用 REGISTER_LOG：缺口注册的 _rlog 行也进同一日志流
+    stt.TRANSCRIBE_LOG = stt.REGISTER_LOG = _trans_log
+    try:
+        try:
+            res = _transcribe_impl(upload_ids, params, confirm_register, allowed)
+        except SystemExit as e:  # stt 的 fatal = web 的报错消息(如 poll_task 转录失败)
+            res = {"error": str(e)}
+        if res.get("error"):
+            _TRANS_PROGRESS["error"] = res["error"]
+        return res
+    except Exception as e:  # do_POST 的兜底还会接手;这里先把错误进进度流
+        _TRANS_PROGRESS["error"] = repr(e)
+        raise
+    finally:
+        stt.TRANSCRIBE_LOG = stt.REGISTER_LOG = None
+        _TRANS_PROGRESS["active"] = False
+
+
+def _transcribe_impl(upload_ids: list[str], params: dict,
+                     confirm_register: bool, allowed: list[str] | None) -> dict:
     """Web version of stt._transcribe_split: silence-split long uploads into chunks,
     allocate chunks + short files across accounts, register the user-confirmed
     shortfall, transcribe each piece, then merge split files back into one subtitle.
@@ -433,12 +487,17 @@ def do_transcribe(upload_ids: list[str], params: dict,
 
     with _LOCK:
         store = stt.load_accounts()
-        accounts = [a for a in store["accounts"] if not a.get("invalid")]
+        try:
+            accounts, manual = stt.filter_accounts(store, allowed or [])
+        except SystemExit as e:      # unknown/invalid email in the manual set
+            return {"error": str(e)}
+        _TRANS_PROGRESS["stage"] = "刷新账号额度"
         for a in accounts:
             stt.account_remaining(a, store)          # accurate remaining
         stt.save_accounts(store)
 
         # --- plan & cut: expand long uploads into chunk entries ------------
+        _TRANS_PROGRESS["stage"] = "切分音频" if needs_split else "分配账号"
         parents: list[dict] = []
         entries: list[dict] = []
         for uid, up in uploads:
@@ -481,6 +540,7 @@ def do_transcribe(upload_ids: list[str], params: dict,
             return {"error": errs or "没有可转录的文件"}
 
         # --- allocate all pieces across accounts ---------------------------
+        _TRANS_PROGRESS["total"] = len(entries)
         costs = [(e["input"], stt.estimate_required(e["dur"])) for e in entries]
         try:
             plan, register_count = stt.allocate(
@@ -488,9 +548,15 @@ def do_transcribe(upload_ids: list[str], params: dict,
         except SystemExit as e:
             return {"error": str(e)}
 
+        # manual mode never registers (强校验,防止预览与实际余额漂移后误注册)
+        if manual and register_count:
+            return {"error": f"所选账号额度不足，还差 {register_count} 个新账号；"
+                             f"手动模式不会自动注册，请增选账号或清空选择回到自动分配"}
+
         # --- register the confirmed shortfall (mirrors _transcribe_split) --
         new_accounts: list[dict] = []
         if register_count:
+            _TRANS_PROGRESS["stage"] = "注册账号"
             if not confirm_register:  # UI confirms first; stale previews bounce here
                 return {"needRegister": register_count}
             if not stt.has_temp_email_config(CONFIG_PATH):
@@ -511,9 +577,12 @@ def do_transcribe(upload_ids: list[str], params: dict,
 
         # --- transcribe each piece -----------------------------------------
         used = []
-        for inp, account in resolved:
+        for i, (inp, account) in enumerate(resolved, 1):
             entry = entry_by_input[inp]
             email = account.get("email")
+            _TRANS_PROGRESS["file"] = entry["parent"]["name"]
+            _TRANS_PROGRESS["stage"] = "转录中"
+            stt._tlog(f"[{i}/{len(resolved)}] {inp.name} → {email}")
             store["active"] = email
             stt.save_accounts(store)
             if account not in used:
@@ -524,12 +593,15 @@ def do_transcribe(upload_ids: list[str], params: dict,
                     output=str(entry["output"]) if entry["output"] else None)
                 entry.update(ok=True, out=out, email=email)
             except Exception as e:  # skip & continue, like cmd_transcribe
+                stt._tlog(f"warn: {inp.name} failed: {e!r}")
                 entry.update(ok=False, err=repr(e), email=email)
+            _TRANS_PROGRESS["done"] += 1
         for a in used:
             stt.account_remaining(a, store, force=True)
         stt.save_accounts(store)
 
     # --- merge per parent, or report failure (mirrors _transcribe_split R8) ---
+    _TRANS_PROGRESS["stage"] = "合并字幕"
     results = []
     for p in parents:
         if p["error"]:
@@ -697,6 +769,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/accounts/register/progress":
             self._send_json(_REG_PROGRESS)
             return
+        if path == "/api/transcribe/progress":
+            self._send_json(_TRANS_PROGRESS)
+            return
         self.send_error(404)
 
     def do_POST(self):
@@ -724,13 +799,16 @@ class Handler(BaseHTTPRequestHandler):
                                  "size": len(data)})
                 return
             if path == "/api/plan":
-                self._send_json(compute_plan(self._read_json().get("files", [])))
+                body = self._read_json()
+                self._send_json(compute_plan(body.get("files", []),
+                                             body.get("allowedEmails") or None))
                 return
             if path == "/api/transcribe":
                 body = self._read_json()
                 self._send_json(do_transcribe(body.get("uploads", []),
                                               body.get("params", {}),
-                                              bool(body.get("confirmRegister"))))
+                                              bool(body.get("confirmRegister")),
+                                              body.get("allowedEmails") or None))
                 return
             if path == "/api/split/plan":
                 self._send_json(do_split_plan(self._read_json()))

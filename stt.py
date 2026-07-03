@@ -395,7 +395,7 @@ def poll_task(client: httpx.Client, task_id: str, timeout: float) -> dict:
         state = task.get("state", "")
         progress = task.get("progress", 0.0)
         if progress != last_progress:
-            print(f"  {state} {progress*100:.0f}%", file=sys.stderr)
+            _tlog(f"{state} {progress*100:.0f}%")
             last_progress = progress
         if task.get("last_error"):
             raise SystemExit(f"transcription failed: {task['last_error']}")
@@ -575,6 +575,15 @@ REGISTER_LOG = None
 def _rlog(msg: str) -> None:
     """Register-flow progress line: routed to the REGISTER_LOG hook or stderr."""
     (REGISTER_LOG or (lambda m: print(f"[register] {m}", file=sys.stderr)))(msg)
+
+
+# web.py 转录期间替换为收集函数以驱动 WebUI 进度轮询；None → 默认打 stderr。
+TRANSCRIBE_LOG = None
+
+
+def _tlog(msg: str) -> None:
+    """Transcribe-flow progress line: routed to the TRANSCRIBE_LOG hook or stderr."""
+    (TRANSCRIBE_LOG or (lambda m: print(f"[stt] {m}", file=sys.stderr)))(msg)
 
 
 def register_one() -> dict[str, Any]:
@@ -830,6 +839,19 @@ def refill_pool(store: dict[str, Any], config_path: pathlib.Path) -> None:
         save_accounts(store)
 
 
+def filter_accounts(store: dict[str, Any], emails: list[str]) -> tuple[list[dict[str, Any]], bool]:
+    """Candidate accounts for allocate(). emails 非空时限定为所列邮箱（手动模式）。
+    Returns (accounts, manual). Unknown / invalid emails raise SystemExit up front."""
+    accounts = [a for a in store["accounts"] if not a.get("invalid")]
+    if not emails:
+        return accounts, False
+    by_email = {a.get("email"): a for a in accounts}
+    bad = [e for e in emails if e not in by_email]
+    if bad:
+        raise SystemExit(f"unknown or invalid account(s): {', '.join(bad)}")
+    return [by_email[e] for e in emails], True
+
+
 class _Bin:
     """A packing bin: an existing account (account set) or a virtual fresh bin (account None)."""
     __slots__ = ("account", "residual", "slot")
@@ -954,21 +976,22 @@ def transcribe_one(audio, cfg, account, store, config_path, output=None) -> path
             if credits is not None:
                 print(f"estimated cost: {credits} credits", file=sys.stderr)
 
-        print(f"uploading {audio.name} ({size/1e6:.1f} MB)...", file=sys.stderr)
+        _tlog(f"上传 {audio.name} ({size/1e6:.1f} MB)…")
         task = create_task(client, audio, cfg)
         task_id = task["_id"]
-        print(f"  task {task_id} state={task.get('state')}", file=sys.stderr)
+        _tlog(f"任务 {task_id} 已创建 (state={task.get('state')})")
 
         result = poll_task(client, task_id, cfg["poll_timeout_secs"])
         lang_code = (result.get("result") or {}).get("language_code")
 
         fmt = cfg["export_format"]
-        print(f"exporting {fmt}...", file=sys.stderr)
+        _tlog(f"导出 {fmt}…")
         content = export_task(client, task_id, fmt, lang_code)
 
     out = pathlib.Path(output) if output else audio.with_suffix(f".{fmt}")
     out.write_bytes(content)
-    print(f"wrote {out} ({len(content)} bytes)")
+    print(f"wrote {out} ({len(content)} bytes)")  # stdout 结果行契约不变
+    _tlog(f"完成 {out.name}")
     return out
 
 
@@ -1054,8 +1077,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                   f"{FREE_DURATION_WARN_SECS}s free-account soft limit", file=sys.stderr)
         costs.append((audio, estimate_required(duration)))
 
-    # refresh live remaining for non-invalid accounts so the plan is accurate
-    accounts = [a for a in store["accounts"] if not a.get("invalid")]
+    # refresh live remaining for candidate accounts so the plan is accurate
+    accounts, manual = filter_accounts(store, args.account)
+    _tlog(f"刷新 {len(accounts)} 个账号额度…")
     for a in accounts:
         account_remaining(a, store)
     save_accounts(store)
@@ -1066,6 +1090,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         return 0
+
+    # manual mode never registers: fail before any side effect (R1/R3)
+    if manual and register_count:
+        raise SystemExit(f"所选账号额度不足，还差 {register_count} 个新账号才能装下全部文件；"
+                         f"请增选账号或去掉 --account 回到自动分配")
 
     if register_count and not has_temp_email_config(config_path):
         raise SystemExit(f"need {register_count} more account(s) but [temp_email] not configured")
@@ -1085,8 +1114,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     results = []
     used: list[dict[str, Any]] = []
     single = len(files) == 1
-    for audio, account in resolved:
+    for i, (audio, account) in enumerate(resolved, 1):
         email = account.get("email")
+        _tlog(f"[{i}/{len(resolved)}] {audio.name} → {email}")
         store["active"] = email
         save_accounts(store)
         if account not in used:
@@ -1096,7 +1126,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                                  args.output if single else None)
             results.append((audio, email, "OK", str(out)))
         except Exception as e:  # skip & continue
-            print(f"warn: {audio.name} failed: {e!r}", file=sys.stderr)
+            _tlog(f"warn: {audio.name} failed: {e!r}")
             results.append((audio, email, "FAIL", repr(e)))
 
     for a in used:
@@ -1196,7 +1226,8 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
 
     # --- allocate all chunks across accounts (reuses the multi-file packer) -----
     costs = [(e["input"], estimate_required(e["dur"])) for e in entries]
-    accounts = [a for a in store["accounts"] if not a.get("invalid")]
+    accounts, manual = filter_accounts(store, args.account)
+    _tlog(f"刷新 {len(accounts)} 个账号额度…")
     for a in accounts:
         account_remaining(a, store)
     save_accounts(store)
@@ -1206,6 +1237,11 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
 
     if args.dry_run:  # AC1: plan only, no cut, no upload
         return 0
+
+    # manual mode never registers: fail before any cutting/upload (R1/R3)
+    if manual and register_count:
+        raise SystemExit(f"所选账号额度不足，还差 {register_count} 个新账号才能装下全部分段；"
+                         f"请增选账号或去掉 --account 回到自动分配")
 
     # fail fast before any cutting if the shortfall cannot be registered
     if register_count and not has_temp_email_config(config_path):
@@ -1240,11 +1276,12 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
     # --- transcribe each chunk -------------------------------------------------
     results = []
     used: list[dict[str, Any]] = []
-    for inp, account in resolved:
+    for i, (inp, account) in enumerate(resolved, 1):
         entry = entry_by_input[inp]
         if entry["ok"] is False:  # cut failed upstream; skip upload
             continue
         email = account.get("email")
+        _tlog(f"[{i}/{len(resolved)}] {inp.name} → {email}")
         store["active"] = email
         save_accounts(store)
         if account not in used:
@@ -1256,7 +1293,7 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
             results.append((inp, email, "OK", str(out)))
         except Exception as e:  # skip & continue; parent won't merge (R8)
             entry["ok"] = False
-            print(f"warn: {inp.name} failed: {e!r}", file=sys.stderr)
+            _tlog(f"warn: {inp.name} failed: {e!r}")
             results.append((inp, email, "FAIL", repr(e)))
 
     for a in used:
@@ -1285,6 +1322,7 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
             print(f"  FAIL   {audio.name}   segment(s) {segs} failed; merge skipped, "
                   f"chunks kept for retry")
             continue
+        _tlog(f"合并 {audio.name} ({len(pentries)} 段)…")
         merged = merger([(e["start"], pathlib.Path(e["output"]).read_text(encoding="utf-8"))
                          for e in sorted(pentries, key=lambda e: e["start"])])
         pathlib.Path(p["final"]).write_text(merged, encoding="utf-8")
@@ -1419,6 +1457,32 @@ def _selfcheck() -> int:
     finally:
         REGISTER_LOG = None
     assert got == ["hook-test"], got
+
+    # TRANSCRIBE_LOG hook: same contract as REGISTER_LOG
+    global TRANSCRIBE_LOG
+    tgot: list[str] = []
+    TRANSCRIBE_LOG = tgot.append
+    try:
+        _tlog("t-hook-test")
+    finally:
+        TRANSCRIBE_LOG = None
+    assert tgot == ["t-hook-test"], tgot
+
+    # filter_accounts: empty emails → all non-invalid; manual limits; unknown raises
+    cand, manual = filter_accounts(fstore, [])
+    assert manual is False and [a["email"] for a in cand] == ["a", "b"]
+    cand, manual = filter_accounts(fstore, ["b"])
+    assert manual is True and [a["email"] for a in cand] == ["b"]
+    try:
+        filter_accounts(fstore, ["b", "nobody@x.y"])
+        assert False, "unknown email should raise"
+    except SystemExit as e:
+        assert "nobody@x.y" in str(e)
+    try:
+        filter_accounts(fstore, ["c"])  # invalid account is not a candidate
+        assert False, "invalid email should raise"
+    except SystemExit:
+        pass
 
     print("selfcheck ok")
     return 0
@@ -1555,6 +1619,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("-o", "--output", help="output file path")
     t.add_argument("--show-cost", action="store_true", help="print estimated credit cost")
     t.add_argument("--poll-timeout", type=int, help="poll timeout seconds")
+    t.add_argument("--account", action="append", default=[], metavar="EMAIL",
+                   help="限定只用这些账号分配（可重复）；额度不足时报错而不注册")
     t.add_argument("--dry-run", action="store_true",
                    help="print the allocation plan and exit (no registration, no upload)")
     t.add_argument("--split", action="store_true",

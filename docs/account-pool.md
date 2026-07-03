@@ -72,6 +72,12 @@ python stt.py transcribe audio.m4a --show-cost
 - 转录前会估算所需积分，乘以 `selection_margin`，再选择满足条件且剩余额度最小的账号。
 - 转录成功后，如果 `auto_refill = true`，脚本会把 fresh 数补回 `pool_target`。
 
+### 手动限定候选集（`--account` / WebUI 高级面板）
+
+- `stt transcribe ... --account x@y.z`（可重复）或 WebUI 转录页的「高级 · 手动指定账号」面板，会把分配候选集限定为所选账号，best-fit 只在集合内进行；单文件 + 单账号即精确指定。
+- 邮箱不存在或账号已失效会在开始前报错。
+- **手动模式不触发自动注册**：所选账号装不下全部文件（含切分段）时直接报错退出，而不是注册新账号——增选账号或回到自动分配即可。转录后的 `auto_refill` 补池行为不受影响，照常执行。
+
 ## 浏览器清理
 
 自动注册必须打开真实 Chrome，因为纯 selector 自动化容易触发 hCaptcha。每注册一个账号，脚本会：

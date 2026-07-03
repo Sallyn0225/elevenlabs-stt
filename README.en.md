@@ -83,7 +83,7 @@ Beyond the CLI, `web.py` spins up a local web page using the standard library, r
 python web.py            # opens http://127.0.0.1:8756
 ```
 
-- **Transcribe page**: drag/multi-select audio → the browser measures duration and estimates credits → auto-allocates accounts by remaining credits (best-fit) → "Start" does the real upload, polling, and export, auto-downloading subtitles when done.
+- **Transcribe page**: drag/multi-select audio → the browser measures duration and estimates credits → auto-allocates accounts by remaining credits (best-fit) → "Start" does the real upload, polling, and export, auto-downloading subtitles when done. The accounts section includes a collapsed-by-default **"Advanced · manually pick accounts"** panel: checking accounts restricts allocation to the selected set (accounts too small for the batch are greyed out); manual mode errors out instead of auto-registering when credits fall short, and clearing the selection returns to auto-allocation. While transcribing, the bottom bar shows **real step-by-step progress** (done/total counter, current file and stage, latest log line), with an expandable full scrolling log.
 - **Accounts page**: reads `accounts.json`, with search/sort/multi-select/pagination and back-to-top, real credit refresh (selected accounts only, fetched concurrently), delete, and JSON export.
 - **Log in**: a dialog takes email + password, logs in via Firebase REST directly and saves the token to `accounts.json` (no browser needed).
 - **Start the registrar**: a dialog exposes the full parameters (mapping to `config.toml → [temp_email]` and the target full-account count); "Save" writes back to `config.toml` (two-way sync with the config file); "Start batch create" saves the config first, then runs a real `pool warm` batch registration. Registration emits step-by-step progress logs: the CLI (`stt pool warm` and transcribe-triggered auto-registration) prints them to stderr, and the Web UI register dialog shows them live with a done/target counter.
@@ -119,6 +119,7 @@ stt selfcheck          offline self-check (no network)
 | `-o, --output` | Output file path (**single file only**; errors with multiple files, which each default to `<name>.<fmt>`) |
 | `--show-cost` | Print estimated credit cost |
 | `--poll-timeout` | Poll timeout in seconds |
+| `--account` | Restrict allocation to this account email (repeatable); errors out instead of auto-registering when the selection can't cover the batch |
 | `--dry-run` | Print the allocation plan and exit — no registration, no upload |
 | `--split` | Split over-long audio on silence into quota-sized parts, transcribe each, merge back into one file (`srt`/`vtt`/`txt` only) |
 | `--chunk-secs` | Per-part target duration cap (seconds); default auto-derived from quota (~569s) |
@@ -152,6 +153,8 @@ With `[temp_email]` and `[accounts]` configured, the script can maintain multipl
 - prints the plan first (`file → account/NEW#k`, `need new: N`), then transcribes sequentially, skipping a failed file and continuing, and finally prints an OK/FAIL summary; exit code is non-zero if any file failed.
 
 `--dry-run` prints the plan and exits without registering or uploading. If `register_count > 0` but `[temp_email]` is not configured, it errors up-front (naming how many accounts are short) before doing any work.
+
+**Manual candidate set**: `--account x@y.z` (repeatable) restricts the allocation candidates to the listed accounts — best-fit then runs only within that set; one file + one account means "this audio uses exactly this account". Unknown or invalid emails error out before any work; if the selection can't hold the whole batch, the run **errors out instead of auto-registering** (add more accounts or drop `--account` to return to auto-allocation). Composes with `--dry-run` and `--split`.
 
 `-o/--output` is single-file only; in a batch each file defaults to its own `<name>.<fmt>`.
 

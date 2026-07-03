@@ -72,6 +72,12 @@ python stt.py transcribe audio.m4a --show-cost
 - Transcription estimates the required credits, multiplies by `selection_margin`, then chooses the smallest account that can cover it.
 - After a successful transcription, if `auto_refill = true`, the script warms the pool back to `pool_target`.
 
+### Manual candidate set (`--account` / Web UI advanced panel)
+
+- `stt transcribe ... --account x@y.z` (repeatable), or the "Advanced · manually pick accounts" panel on the Web UI transcribe page, restricts the allocation candidates to the selected accounts; best-fit then runs only within that set. One file + one account means an exact assignment.
+- Unknown or invalid emails error out before any work starts.
+- **Manual mode never auto-registers**: if the selected accounts can't hold the whole batch (including split segments), the run errors out instead of registering new accounts — add more accounts or return to auto-allocation. The post-transcription `auto_refill` pool warm-up is unaffected and runs as usual.
+
 ## Browser cleanup
 
 Auto-registration opens a real Chrome window because selector automation can trigger hCaptcha. For each account, the script:
