@@ -775,6 +775,45 @@ def fresh_count(store: dict[str, Any], threshold: int) -> int:
                if not a.get("invalid") and (cached_remaining(a) or 0) >= threshold)
 
 
+def pool_counts(store: dict[str, Any], threshold: int) -> dict[str, int]:
+    """账号池状态计数（纯缓存，不联网）；cmd_pool_status 与 web.pool_summary 共用。"""
+    fresh = usable = depleted = invalid = unknown = 0
+    for a in store["accounts"]:
+        if a.get("invalid"):
+            invalid += 1
+            continue
+        rem = cached_remaining(a)
+        if rem is None:
+            unknown += 1
+        elif rem == 0:
+            depleted += 1
+        elif rem >= threshold:
+            fresh += 1
+        else:
+            usable += 1
+    return {"fresh": fresh, "usable": usable, "depleted": depleted,
+            "invalid": invalid, "unknown": unknown, "total": len(store["accounts"])}
+
+
+def refresh_many(store: dict[str, Any], targets: list[dict[str, Any]], on_each=None) -> None:
+    """并行 force 刷新 targets 的额度。每个线程只写自己的账号 dict，落盘延后到全部
+    完成后一次执行，避免多线程并发 dump 共享 store 的竞态（含 JWT 轮换的中间保存）。
+    on_each: 可选 (account, rem) 回调，单个账号刷新完成后在工作线程内调用。"""
+    def _one(a):
+        rem = account_remaining(a, store, force=True, save=lambda _s: None)
+        if on_each:
+            on_each(a, rem)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_one, targets))
+    if targets:
+        save_accounts(store)
+
+
+def manual_shortfall_msg(n: int, tail: str) -> str:
+    """手动模式缺口报错：共用前缀 + 调用方后缀（CLI 与 web 文案后缀不同，逐字保持现状）。"""
+    return f"所选账号额度不足，还差 {n} 个新账号{tail}"
+
+
 def refill_pool(store: dict[str, Any], config_path: pathlib.Path) -> None:
     acfg = accounts_config(config_path)
     if not acfg["auto_refill"] or not has_temp_email_config(config_path):
@@ -1146,8 +1185,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     # manual mode never registers: fail before any side effect (R1/R3)
     if manual and register_count:
-        raise SystemExit(f"所选账号额度不足，还差 {register_count} 个新账号才能装下全部文件；"
-                         f"请增选账号或去掉 --account 回到自动分配")
+        raise SystemExit(manual_shortfall_msg(
+            register_count, "才能装下全部文件；请增选账号或去掉 --account 回到自动分配"))
 
     if register_count and not has_temp_email_config(config_path):
         raise SystemExit(f"need {register_count} more account(s) but [temp_email] not configured")
@@ -1264,8 +1303,8 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
 
     # manual mode never registers: fail before any cutting/upload (R1/R3)
     if manual and register_count:
-        raise SystemExit(f"所选账号额度不足，还差 {register_count} 个新账号才能装下全部分段；"
-                         f"请增选账号或去掉 --account 回到自动分配")
+        raise SystemExit(manual_shortfall_msg(
+            register_count, "才能装下全部分段；请增选账号或去掉 --account 回到自动分配"))
 
     # fail fast before any cutting if the shortfall cannot be registered
     if register_count and not has_temp_email_config(config_path):
@@ -1510,17 +1549,12 @@ def cmd_accounts(args: argparse.Namespace) -> int:
     if args.refresh:
         targets = [a for a in accts
                    if not a.get("invalid") and (not wanted or a.get("email") in wanted)]
-        # parallel fetch, no per-thread saves; single save_accounts below (same pattern as web.do_refresh)
-        def _one(a):
-            rem = account_remaining(a, store, force=True, save=lambda _s: None)
-            print(f"  refreshed {a.get('email')}: rem={rem}", file=sys.stderr)
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            list(ex.map(_one, targets))
+        refresh_many(store, targets, on_each=lambda a, rem: print(
+            f"  refreshed {a.get('email')}: rem={rem}", file=sys.stderr))
         if wanted:
             known = {a.get("email") for a in accts}
             for e in sorted(wanted - known):
                 print(f"  no matching account: {e}", file=sys.stderr)
-        save_accounts(store)
     active = store.get("active")
     print(f"{'email':<34} {'src':<7} {'remaining':>9}  state")
     print("-" * 62)
@@ -1577,25 +1611,14 @@ def cmd_pool_status(args: argparse.Namespace) -> int:
     acfg = accounts_config(pathlib.Path(args.config))
     threshold = acfg["fresh_threshold"]
     target = acfg["pool_target"]
-    fresh = usable = depleted = invalid = unknown = 0
-    for a in store["accounts"]:
-        if a.get("invalid"):
-            invalid += 1; continue
-        rem = cached_remaining(a)
-        if rem is None:
-            unknown += 1
-        elif rem == 0:
-            depleted += 1
-        elif rem >= threshold:
-            fresh += 1
-        else:
-            usable += 1
+    c = pool_counts(store, threshold)
+    fresh = c["fresh"]
     print(f"pool target: {target}")
     print(f"  fresh (>= {threshold}):    {fresh}")
-    print(f"  usable:           {usable}")
-    print(f"  depleted:         {depleted}")
-    print(f"  unknown (refresh first): {unknown}")
-    print(f"  invalid:          {invalid}")
+    print(f"  usable:           {c['usable']}")
+    print(f"  depleted:         {c['depleted']}")
+    print(f"  unknown (refresh first): {c['unknown']}")
+    print(f"  invalid:          {c['invalid']}")
     if fresh < target:
         msg = f"  -> below target by {target - fresh}; run `stt pool warm`"
         if not has_temp_email_config(pathlib.Path(args.config)):

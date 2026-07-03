@@ -20,7 +20,6 @@ import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audio_split
@@ -73,20 +72,9 @@ def account_view(a: dict) -> dict:
 
 
 def pool_summary(store: dict, acfg: dict) -> dict:
-    thr = acfg["fresh_threshold"]
-    fresh = usable = depleted = 0
-    for a in store["accounts"]:
-        if a.get("invalid"):
-            continue
-        rem = stt.cached_remaining(a)
-        if rem is None or rem == 0:
-            depleted += rem == 0
-        elif rem >= thr:
-            fresh += 1
-        else:
-            usable += 1
-    return {"total": len(store["accounts"]), "fresh": fresh,
-            "usable": usable, "target": acfg["pool_target"]}
+    c = stt.pool_counts(store, acfg["fresh_threshold"])
+    return {"total": c["total"], "fresh": c["fresh"],
+            "usable": c["usable"], "target": acfg["pool_target"]}
 
 
 def build_state() -> dict:
@@ -178,8 +166,8 @@ def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
            "totalNeed": total_need, "totalCredits": total_credits,
            "files": finfo, "oversize": oversize, "minNeed": min_need}
     if manual and register_count:
-        out["error"] = (f"所选账号额度不足，还差 {register_count} 个新账号；"
-                        f"手动模式不会自动注册，请增选账号或清空选择回到自动分配")
+        out["error"] = stt.manual_shortfall_msg(
+            register_count, "；手动模式不会自动注册，请增选账号或清空选择回到自动分配")
     return out
 
 
@@ -191,14 +179,7 @@ def do_refresh(emails: list[str]) -> dict:
         wanted = set(emails)
         targets = [a for a in store["accounts"]
                    if a.get("email") in wanted and not a.get("invalid")]
-        # 并行拉额度：每个线程只写自己的账号 dict，落盘延后到全部完成后一次执行，
-        # 避免多线程并发 dump 共享 store 的竞态（含 JWT 轮换的中间保存）。
-        noop = lambda _s: None
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            list(ex.map(lambda a: stt.account_remaining(a, store, force=True, save=noop),
-                        targets))
-        if targets:
-            stt.save_accounts(store)
+        stt.refresh_many(store, targets)
         return build_state()
 
 
@@ -517,8 +498,8 @@ def _transcribe_impl(upload_ids: list[str], params: dict,
 
         # manual mode never registers (强校验,防止预览与实际余额漂移后误注册)
         if manual and register_count:
-            return {"error": f"所选账号额度不足，还差 {register_count} 个新账号；"
-                             f"手动模式不会自动注册，请增选账号或清空选择回到自动分配"}
+            return {"error": stt.manual_shortfall_msg(
+                register_count, "；手动模式不会自动注册，请增选账号或清空选择回到自动分配")}
 
         # --- register the confirmed shortfall (mirrors _transcribe_split) --
         new_accounts: list[dict] = []
