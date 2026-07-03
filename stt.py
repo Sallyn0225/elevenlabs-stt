@@ -944,6 +944,70 @@ def transcribe_one(audio, cfg, account, store, config_path, output=None) -> path
     return out
 
 
+def register_shortfall(store, count: int) -> list[dict[str, Any]]:
+    """注册 count 个新账号，逐个 upsert 进 store。
+    落盘语义：全部成功 → 结束时 save 一次；中途异常 → 先 save（保住已注册的）再 raise。"""
+    new: list[dict[str, Any]] = []
+    try:
+        for i in range(count):
+            _rlog(f"注册缺口账号 {i + 1}/{count}")
+            acct = register_one()
+            upsert_account(store, acct)
+            new.append(acct)
+    except BaseException:  # KeyboardInterrupt 也保住已注册账号（一个 ~1 分钟，丢了最贵）
+        if new:
+            save_accounts(store)
+        raise
+    if count:
+        save_accounts(store)
+    return new
+
+
+def resolve_plan(plan, new_accounts) -> list[tuple[Any, dict[str, Any]]]:
+    """把 allocate 输出里的 "NEW#k" 槽位换成 register_shortfall 返回的真实账号。"""
+    return [(inp, new_accounts[int(t.split("#")[1])] if isinstance(t, str) else t)
+            for inp, t in plan]
+
+
+def run_plan(resolved, cfg, store, config_path, output_for,
+             on_start=None, on_done=None) -> tuple[list, list]:
+    """逐项执行转录计划；结束后对用过的账号 force 刷新额度。
+
+    resolved:   [(input_path, account_dict)]（NEW#k 已换成真实账号、上游失败项已滤掉）
+    output_for: input_path -> 输出路径 str | None（None = transcribe_one 默认命名）
+    on_start:   可选 (i, total, inp, account) 回调，转录该项之前调用（web 进度用）
+    on_done:    可选 (inp, ok) 回调，该项结束后调用（web done 计数用）
+    返回 (results, used)：results 元素为 (inp, email, "OK"|"FAIL", detail)，与
+    print_summary 的元组契约一致；detail 成功时是输出路径 str，失败时 repr(e)。
+    """
+    results, used = [], []
+    total = len(resolved)
+    for i, (inp, account) in enumerate(resolved, 1):
+        email = account.get("email")
+        if on_start:
+            on_start(i, total, inp, account)
+        _tlog(f"[{i}/{total}] {inp.name} → {email}")
+        store["active"] = email
+        save_accounts(store)
+        if account not in used:
+            used.append(account)
+        try:
+            out = transcribe_one(inp, cfg, account, store, config_path, output_for(inp))
+            results.append((inp, email, "OK", str(out)))
+            ok = True
+        except Exception as e:  # skip & continue
+            _tlog(f"warn: {inp.name} failed: {e!r}")
+            results.append((inp, email, "FAIL", repr(e)))
+            ok = False
+        if on_done:
+            on_done(inp, ok)
+    for a in used:
+        # ponytail: ElevenLabs debits credits asynchronously — this refresh can race
+        # the debit and record a still-high remaining; margin + next-run refresh absorb the lag.
+        account_remaining(a, store, force=True)
+    return results, used
+
+
 def print_plan(plan, register_count, margin, fresh_threshold) -> None:
     """Print the allocation plan to stderr (design format)."""
     print(f"plan (margin {margin}, fresh {fresh_threshold}):", file=sys.stderr)
@@ -1049,39 +1113,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         raise SystemExit(f"need {register_count} more account(s) but [temp_email] not configured")
 
     # register the exact shortfall up-front, then bind NEW#k slots -> registered accounts
-    new: list[dict[str, Any]] = []
-    for i in range(register_count):
-        _rlog(f"注册缺口账号 {i + 1}/{register_count}")
-        acct = register_one()
-        upsert_account(store, acct)
-        new.append(acct)
-    if register_count:
-        save_accounts(store)
-    resolved = [(audio, new[int(t.split("#")[1])] if isinstance(t, str) else t)
-                for audio, t in plan]
-
-    results = []
-    used: list[dict[str, Any]] = []
+    resolved = resolve_plan(plan, register_shortfall(store, register_count))
     single = len(files) == 1
-    for i, (audio, account) in enumerate(resolved, 1):
-        email = account.get("email")
-        _tlog(f"[{i}/{len(resolved)}] {audio.name} → {email}")
-        store["active"] = email
-        save_accounts(store)
-        if account not in used:
-            used.append(account)
-        try:
-            out = transcribe_one(audio, cfg, account, store, config_path,
-                                 args.output if single else None)
-            results.append((audio, email, "OK", str(out)))
-        except Exception as e:  # skip & continue
-            _tlog(f"warn: {audio.name} failed: {e!r}")
-            results.append((audio, email, "FAIL", repr(e)))
-
-    for a in used:
-        # ponytail: ElevenLabs debits credits asynchronously — this refresh can race
-        # the debit and record a still-high remaining; margin + next-run refresh absorb the lag.
-        account_remaining(a, store, force=True)  # refresh post-use credits before refill decision
+    results, _ = run_plan(resolved, cfg, store, config_path,
+                          output_for=lambda _inp: args.output if single else None)
     try:
         refill_pool(store, config_path)
     except KeyboardInterrupt:
@@ -1210,43 +1245,16 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
                     entry["skipped"] = True
 
     # register the exact shortfall, bind NEW#k slots -> registered accounts
-    new: list[dict[str, Any]] = []
-    for i in range(register_count):
-        _rlog(f"注册缺口账号 {i + 1}/{register_count}")
-        acct = register_one()
-        upsert_account(store, acct)
-        new.append(acct)
-    if register_count:
-        save_accounts(store)
-    resolved = [(inp, new[int(t.split("#")[1])] if isinstance(t, str) else t)
-                for inp, t in plan]
+    resolved = resolve_plan(plan, register_shortfall(store, register_count))
     entry_by_input = {e["input"]: e for e in entries}
 
-    # --- transcribe each chunk -------------------------------------------------
-    results = []
-    used: list[dict[str, Any]] = []
-    for i, (inp, account) in enumerate(resolved, 1):
-        entry = entry_by_input[inp]
-        if entry["ok"] is False:  # cut failed upstream; skip upload
-            continue
-        email = account.get("email")
-        _tlog(f"[{i}/{len(resolved)}] {inp.name} → {email}")
-        store["active"] = email
-        save_accounts(store)
-        if account not in used:
-            used.append(account)
-        try:
-            out = transcribe_one(inp, cfg, account, store, config_path,
-                                 output=str(entry["output"]))
-            entry["ok"] = True
-            results.append((inp, email, "OK", str(out)))
-        except Exception as e:  # skip & continue; parent won't merge (R8)
-            entry["ok"] = False
-            _tlog(f"warn: {inp.name} failed: {e!r}")
-            results.append((inp, email, "FAIL", repr(e)))
-
-    for a in used:
-        account_remaining(a, store, force=True)
+    # --- transcribe each chunk (cut-failed entries skip upload) ----------------
+    resolved = [(inp, acct) for inp, acct in resolved
+                if entry_by_input[inp]["ok"] is not False]
+    results, _ = run_plan(resolved, cfg, store, config_path,
+                          output_for=lambda inp: str(entry_by_input[inp]["output"]))
+    for inp, email, status, detail in results:  # merge (below) reads entry["ok"]
+        entry_by_input[inp]["ok"] = status == "OK"
     try:
         refill_pool(store, config_path)
     except KeyboardInterrupt:
@@ -1359,6 +1367,8 @@ def _selfcheck() -> int:
         assert False, "oversize file should raise"
     except SystemExit:
         pass
+    # register_shortfall(store, 0): 不触发注册、不落盘（零成本冒烟）
+    assert register_shortfall({"accounts": [], "active": None}, 0) == []
 
     # --- audio_split pure logic (offline; AC7) --------------------------------
     # default_chunk_secs: chunk fits one fresh account within margin

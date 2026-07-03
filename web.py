@@ -563,41 +563,32 @@ def _transcribe_impl(upload_ids: list[str], params: dict,
                 return {"error": f"当前账号池不足，还需 {register_count} 个新账号，"
                                  f"但 [temp_email] 未配置。请先在「启动注册机」中完成配置。"}
             try:
-                for _ in range(register_count):
-                    acct = stt.register_one()
-                    stt.upsert_account(store, acct)
-                    new_accounts.append(acct)
-            except (Exception, SystemExit) as e:  # keep already-registered accounts
-                stt.save_accounts(store)
+                new_accounts = stt.register_shortfall(store, register_count)
+            except (Exception, SystemExit) as e:  # 已注册账号已由 helper 落盘
                 return {"error": f"注册新账号失败：{e!r}", "state": build_state()}
-            stt.save_accounts(store)
-        resolved = [(inp, new_accounts[int(t.split("#")[1])] if isinstance(t, str) else t)
-                    for inp, t in plan]
+        resolved = stt.resolve_plan(plan, new_accounts)
         entry_by_input = {e["input"]: e for e in entries}
 
         # --- transcribe each piece -----------------------------------------
-        used = []
-        for i, (inp, account) in enumerate(resolved, 1):
-            entry = entry_by_input[inp]
-            email = account.get("email")
-            _TRANS_PROGRESS["file"] = entry["parent"]["name"]
+        def _on_start(i, total, inp, account):
+            _TRANS_PROGRESS["file"] = entry_by_input[inp]["parent"]["name"]
             _TRANS_PROGRESS["stage"] = "转录中"
-            stt._tlog(f"[{i}/{len(resolved)}] {inp.name} → {email}")
-            store["active"] = email
-            stt.save_accounts(store)
-            if account not in used:
-                used.append(account)
-            try:
-                out = stt.transcribe_one(
-                    inp, cfg, account, store, CONFIG_PATH,
-                    output=str(entry["output"]) if entry["output"] else None)
-                entry.update(ok=True, out=out, email=email)
-            except Exception as e:  # skip & continue, like cmd_transcribe
-                stt._tlog(f"warn: {inp.name} failed: {e!r}")
-                entry.update(ok=False, err=repr(e), email=email)
+
+        def _on_done(inp, ok):
             _TRANS_PROGRESS["done"] += 1
-        for a in used:
-            stt.account_remaining(a, store, force=True)
+
+        results_raw, _ = stt.run_plan(
+            resolved, cfg, store, CONFIG_PATH,
+            output_for=lambda inp: (str(entry_by_input[inp]["output"])
+                                    if entry_by_input[inp]["output"] else None),
+            on_start=_on_start, on_done=_on_done)
+        for inp, email, status, detail in results_raw:  # merge 段读 ok/out/err/email
+            entry = entry_by_input[inp]
+            entry.update(ok=status == "OK", email=email)
+            if status == "OK":
+                entry["out"] = pathlib.Path(detail)
+            else:
+                entry["err"] = detail
         stt.save_accounts(store)
 
     # --- merge per parent, or report failure (mirrors _transcribe_split R8) ---
