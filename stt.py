@@ -292,18 +292,6 @@ def random_password() -> str:
     return "El1!" + "".join(secrets.choice(alphabet) for _ in range(12))
 
 
-def firebase_verify_oob_code(oob_code: str) -> dict[str, Any]:
-    r = httpx.post(
-        f"{IDENTITY_URL}:update?key={FIREBASE_API_KEY}",
-        json={"oobCode": oob_code},
-        headers={"Referer": FIREBASE_REFERER},
-        timeout=30,
-    )
-    if r.status_code >= 400:
-        raise SystemExit(f"firebase verify failed ({r.status_code}): {r.text[:300]}")
-    return r.json()
-
-
 def firebase_signin_password(email: str, password: str) -> dict[str, Any]:
     r = httpx.post(
         f"{IDENTITY_URL}:signInWithPassword?key={FIREBASE_API_KEY}",
@@ -417,20 +405,6 @@ def export_task(client: httpx.Client, task_id: str, fmt: str, lang_code: str | N
 
 # --- temp-email --------------------------------------------------------
 
-OOB_RE = re.compile(r"[?&]oobCode=([A-Za-z0-9_-]+)")
-
-
-def extract_oob_code(*parts: str | None) -> str | None:
-    """Extract Firebase oobCode from mail subject/text/html."""
-    for part in parts:
-        if not part:
-            continue
-        match = OOB_RE.search(html.unescape(part))
-        if match:
-            return match.group(1)
-    return None
-
-
 def temp_email_create(name: str | None = None,
                       cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create a cloudflare_temp_email address; admin path first, user path fallback."""
@@ -478,31 +452,6 @@ def latest_verify_link(addr_jwt: str, cfg: dict[str, Any] | None = None) -> str:
                 match = re.search(r"https://elevenlabs\.io/app/action\?[^\s\"<>]+oobCode=[^\s\"<>]+", text)
                 if match:
                     return match.group(0)
-            time.sleep(float(cfg["poll_interval_secs"]))
-    raise SystemExit("timed out waiting for ElevenLabs verification email")
-
-
-def poll_parsed_mails(addr_jwt: str, cfg: dict[str, Any] | None = None) -> str:
-    """Poll parsed mails until the first Firebase oobCode appears."""
-    cfg = cfg or temp_email_config()
-    base = str(cfg["base_url"]).rstrip("/")
-    deadline = time.time() + float(cfg["poll_timeout_secs"])
-    seen: set[str] = set()
-    headers = {"Authorization": f"Bearer {addr_jwt}"}
-    with httpx.Client(timeout=30) as client:
-        while time.time() < deadline:
-            r = client.get(f"{base}/api/parsed_mails", params={"limit": 20, "offset": 0},
-                           headers=headers)
-            if r.status_code >= 400:
-                raise SystemExit(f"temp-email poll failed ({r.status_code}): {r.text[:300]}")
-            for mail in r.json().get("results", []):
-                mid = str(mail.get("id") or "")
-                if mid in seen:
-                    continue
-                seen.add(mid)
-                code = extract_oob_code(mail.get("subject"), mail.get("text"), mail.get("html"))
-                if code:
-                    return code
             time.sleep(float(cfg["poll_interval_secs"]))
     raise SystemExit("timed out waiting for ElevenLabs verification email")
 
@@ -1376,8 +1325,6 @@ def _selfcheck() -> int:
     ]
     fstore = {"accounts": fake, "active": "a"}
     assert cached_remaining(fake[0]) == 1000 and cached_remaining(fake[1]) == 10000
-    sample_link = "https://elevenlabs.io/app/action?mode=verifyEmail&amp;oobCode=ABC_def-123&apiKey=x"
-    assert extract_oob_code(sample_link) == "ABC_def-123"
     pw = random_password()
     assert len(pw) >= 8 and any(c.isdigit() for c in pw) and any(not c.isalnum() for c in pw)
     assert fresh_count(fstore, 10000) == 1 and fresh_count(fstore, 1000) == 2
