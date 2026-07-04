@@ -33,6 +33,16 @@ input{font-family:inherit;letter-spacing:inherit}
 @media (max-width:480px){.hdr-meta{display:none!important}}
 /* 转录页正文栅格 — 窄屏塌陷为单列(基础样式内联,故 !important) */
 @media (max-width:640px){.grid-2,.grid-3{grid-template-columns:1fr!important}}
+/* 账号管理页窄屏 — 基础样式内联,故 !important。统计卡 4→2 列;header 动作簇换行、按钮内文字不断行;
+   账号行 flex-wrap:邮箱回首行、删除留首行右侧(order:1)、额度整条下移铺满(order:2) */
+@media (max-width:640px){
+  .acct-stats{grid-template-columns:1fr 1fr!important}
+  .acct-actions{flex-wrap:wrap!important}
+  .acct-actions button,.acct-actions label{white-space:nowrap!important}
+  .acct-row{flex-wrap:wrap!important}
+  .acct-row .acct-del{order:1}
+  .acct-row .acct-quota{order:2;flex:1 0 100%!important;width:auto!important;text-align:left!important}
+}
 /* 触控设备最小命中区 44×44(coarse 指针才放大,鼠标端保持紧凑密度) */
 @media (pointer:coarse){.tap{min-width:44px!important;min-height:44px!important;height:auto!important}}
 /* 降级动效:装饰性 fadein/pop 与过渡归零;加载 spinner 是功能反馈,豁免保留旋转 */
@@ -425,7 +435,7 @@ function accountsView(){
     const statusColor={fresh:'var(--green)',partial:'var(--amber)',depleted:'var(--red)',invalid:'var(--red)',unknown:'var(--mut-fg)'}[a.status]||'var(--mut-fg)';
     const barColor=a.rem===0?'var(--red)':pct<30?'var(--amber)':'var(--accent)';
     const pw=a.password?(rev?a.password:'••••••••••'):'—';
-    return `<div style="display:flex;align-items:center;gap:15px;padding:15px 17px;border-radius:6px;background:var(--panel,#fff);${sel?'border:1px solid var(--fg)':'border:1px solid var(--border)'}">
+    return `<div class="acct-row" style="display:flex;align-items:center;gap:15px;padding:15px 17px;border-radius:6px;background:var(--panel,#fff);${sel?'border:1px solid var(--fg)':'border:1px solid var(--border)'}">
       <div data-act="toggleSel" data-arg="${esc(a.email)}" style="${cbBox(sel)}">${CHECK}</div>
       <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;color:var(--mut-fg)">${esc((a.email||'?')[0].toUpperCase())}</div>
       <div style="flex:1;min-width:0">
@@ -441,12 +451,12 @@ function accountsView(){
           <div style="display:flex;align-items:center;gap:6px" class="mono"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg>${esc(a.createdStr)}</div>
         </div>
       </div>
-      <div style="flex:none;width:170px;text-align:right">
+      <div class="acct-quota" style="flex:none;width:170px;text-align:right">
         <div style="font-size:14px;font-weight:600" class="mono">${a.rem!=null?fmt(a.rem):'—'}</div>
         <div style="margin-top:2px;font-size:11px;color:var(--mut-fg)">剩余 / ${fmt(a.limit)}</div>
         <div style="margin-top:8px;height:6px;border-radius:999px;background:var(--track);overflow:hidden"><div style="height:100%;width:${pct}%;background:${barColor};border-radius:999px"></div></div>
       </div>
-      <button data-act="delOne" data-arg="${esc(a.email)}" style="flex:none;width:32px;height:32px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--mut-fg);cursor:pointer;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+      <button data-act="delOne" data-arg="${esc(a.email)}" class="acct-del" style="flex:none;width:32px;height:32px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--mut-fg);cursor:pointer;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
     </div>`;
   }).join('');
 
@@ -473,14 +483,14 @@ function accountsView(){
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
       <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">账号管理</h1>
         <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">本地保存的 ElevenLabs 账号 · 邮箱、密码与剩余额度 · 数据存于 accounts.json</p></div>
-      <div style="display:flex;align-items:center;gap:9px">
+      <div class="acct-actions" style="display:flex;align-items:center;gap:9px">
         <button data-act="exportSel" style="display:flex;align-items:center;gap:7px;padding:9px 15px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>导出</button>
         <label style="display:flex;align-items:center;gap:7px;padding:9px 15px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer"><input data-input="importFile" type="file" accept="application/json,.json" style="display:none"/><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>导入账号</label>
         <button data-act="openLogin" style="display:flex;align-items:center;gap:7px;padding:9px 15px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>登录账号</button>
         <button data-act="openReg" style="display:flex;align-items:center;gap:7px;padding:9px 16px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>启动注册机</button>
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+    <div class="acct-stats" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
       ${statCard('本地账号',accts.length)}${statCard('总剩余额度',fmt(totalRem))}${statCard('满额账号',fresh)}${statCard('已选择',S.selected.length)}
     </div>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -497,6 +507,7 @@ function accountsView(){
     <div style="display:flex;align-items:center;gap:13px;padding:0 4px">
       <div data-act="toggleAll" style="${cbBox(allSel)}">${CHECK}</div>
       <span style="font-size:12.5px;color:var(--mut-fg)">全选本页 · 共 ${accts.length} 个账号</span>
+      ${S.revealed.length?`<button data-act="hideAllPw" style="display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12px;font-weight:500;cursor:pointer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>隐藏 ${S.revealed.length} 个已显示密码</button>`:''}
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
         <span style="font-size:12px;color:var(--mut-fg)">每页显示</span>
         <div style="display:flex;gap:2px;padding:2px;background:var(--muted);border-radius:6px">${pageSizeSel}</div>
@@ -624,7 +635,7 @@ function modalsHTML(){
       </div>
       <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)">
         <button data-act="confirmCancel" style="padding:9px 18px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">取消</button>
-        <button data-act="confirmOk" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">${esc(c.okLabel||'确认')}</button>
+        <button data-act="confirmOk" style="padding:9px 18px;border-radius:6px;border:none;background:${c.danger?'var(--red)':'var(--accent)'};color:${c.danger?'#fff':'var(--accent-fg)'};font-size:13.5px;font-weight:600;cursor:pointer">${esc(c.okLabel||'确认')}</button>
       </div>
     </div></div>`;
   }
@@ -852,9 +863,17 @@ function a11yPass(){
 
 // 应用内确认:返回 Promise<boolean>,替代原生 confirm()。resolve 由 confirmOk/confirmCancel 委托触发。
 function uiConfirm(opts){
-  return new Promise(res=>{ S.confirmBox={title:opts.title,lines:opts.lines||[],okLabel:opts.okLabel,resolve:res}; render(); });
+  return new Promise(res=>{ S.confirmBox={title:opts.title,lines:opts.lines||[],okLabel:opts.okLabel,danger:opts.danger,resolve:res}; render(); });
 }
 function closeConfirm(ok){ const r=S.confirmBox&&S.confirmBox.resolve; S.confirmBox=null; render(); if(r)r(ok); }
+// 复制密码 30s 后尝试清空剪贴板:仅当当前剪贴板仍是该密码时才清,读不到(权限/失焦)则放弃,不误清用户后续复制的内容
+let _clipTimer=null;
+function clearClipboardLater(val){
+  if(_clipTimer)clearTimeout(_clipTimer);
+  _clipTimer=setTimeout(()=>{ _clipTimer=null;
+    try{ navigator.clipboard.readText().then(cur=>{ if(cur===val)navigator.clipboard.writeText('').catch(()=>{}); }).catch(()=>{}); }catch(e){}
+  },30000);
+}
 
 // back-to-top: a single persistent button outside #app, shown on the accounts page
 // after scrolling. Kept off the render() innerHTML so scroll never re-renders the app.
@@ -995,9 +1014,9 @@ document.addEventListener('click',e=>{
   const act=el.dataset.act, arg=el.dataset.arg;
   const handlers={
     toggleTheme(){S.theme=S.theme==='dark'?'light':'dark';applyTheme(S.theme);render();},
-    goTranscribe(){S.view='transcribe';S.sortOpen=false;render();},
-    goAccounts(){S.view='accounts';reloadState();},
-    goTools(){S.view='tools';S.sortOpen=false;render();},
+    goTranscribe(){S.view='transcribe';S.sortOpen=false;S.revealed=[];render();},
+    goAccounts(){S.view='accounts';S.revealed=[];reloadState();},
+    goTools(){S.view='tools';S.sortOpen=false;S.revealed=[];render();},
     // 功能管理 · 长音频切分
     toolToggle(){S.tool.expanded=S.tool.expanded.includes(arg)?S.tool.expanded.filter(x=>x!==arg):[...S.tool.expanded,arg];render();},
     toolRemove(){S.tool.files=S.tool.files.filter(f=>String(f.id==null?'':f.id)!==arg);delete S.tool.plans[arg];S.tool.expanded=S.tool.expanded.filter(x=>x!==arg);S.tool.status='idle';render();refreshToolPlans();}, // id==null → 上传失败行,data-arg 为空串也能移除
@@ -1029,7 +1048,8 @@ document.addEventListener('click',e=>{
     toggleSel(){S.selected=S.selected.includes(arg)?S.selected.filter(x=>x!==arg):[...S.selected,arg];render();},
     toggleRev(){S.revealed=S.revealed.includes(arg)?S.revealed.filter(x=>x!==arg):[...S.revealed,arg];render();},
     copyEmail(){try{navigator.clipboard.writeText(arg);toast('已复制邮箱');}catch(e){}},
-    copyPw(){const a=(S.data?S.data.accounts:[]).find(x=>x.email===arg);if(a&&a.password){try{navigator.clipboard.writeText(a.password);toast('已复制密码');}catch(e){}}},
+    copyPw(){const a=(S.data?S.data.accounts:[]).find(x=>x.email===arg);if(a&&a.password){try{navigator.clipboard.writeText(a.password);toast('已复制密码 · 30 秒后自动清除剪贴板');clearClipboardLater(a.password);}catch(e){}}},
+    hideAllPw(){S.revealed=[];render();},
     toggleAll(){const list=S._pageEmails;const all=list.length>0&&list.every(x=>S.selected.includes(x));S.selected=all?S.selected.filter(x=>!list.includes(x)):[...new Set([...S.selected,...list])];render();},
     clearSel(){S.selected=[];render();},
     toggleSort(){S.sortOpen=!S.sortOpen;render();},
@@ -1039,8 +1059,8 @@ document.addEventListener('click',e=>{
     nextPage(){S.page=Math.min(S._totalPages,S._page+1);render();},
     gotoPage(){S.page=+arg;render();},
     setPageSize(){S.pageSize=+arg;S.page=1;render();},
-    delOne(){if(confirm('删除账号 '+arg+' ?'))deleteAccounts([arg]);},
-    delSel(){if(confirm('删除选中的 '+S.selected.length+' 个账号?'))deleteAccounts(S.selected.slice());},
+    async delOne(){const em=arg;if(await uiConfirm({title:'删除账号',lines:['将删除账号 '+em,'该账号的登录令牌会一并从本机移除,此操作不可撤销。'],okLabel:'删除账号',danger:true}))deleteAccounts([em]);},
+    async delSel(){const ems=S.selected.slice();if(!ems.length)return;const preview=ems.slice(0,5);const more=ems.length>5?`…等共 ${ems.length} 个账号`:'';if(await uiConfirm({title:`删除 ${ems.length} 个账号`,lines:[...preview,more,'这些账号的登录令牌会一并从本机移除,此操作不可撤销。'].filter(Boolean),okLabel:`删除 ${ems.length} 个`,danger:true}))deleteAccounts(ems);},
     refreshSel(){refreshCredits(S.selected.slice());},
     exportSel(){exportAccounts(S.selected.slice());},
     closeImport(){S.importOpen=null;render();},
@@ -1050,7 +1070,7 @@ document.addEventListener('click',e=>{
     decCount(){S.reg.target=Math.max(1,(+S.reg.target||1)-1);render();}, incCount(){S.reg.target=(+S.reg.target||0)+1;render();},
     doLogin(){runLogin();},
     doRegSave(){runRegSave();},
-    doReg(){runRegister();},
+    async doReg(){const t=parseInt(String((S.reg&&S.reg.target)||'').replace(/[^0-9]/g,''),10)||0;if(await uiConfirm({title:'确认批量创建账号',lines:[`将通过临时邮箱批量注册,把满额账号补至 ${t} 个。`,'注册所得邮箱与密码将以明文保存在本机 accounts.json。','批量注册可能违反 ElevenLabs 服务条款,请自行评估风险。'],okLabel:'我已知悉,开始创建'}))runRegister();},
     stop(){e.stopPropagation();},
   };
   if(act.startsWith('tg:')){const k=act.slice(3);S.params[k]=!S.params[k];render();if(k==='skip_silence')refreshPlan();return;} // 跳静音影响切分段数 → 重算预览
