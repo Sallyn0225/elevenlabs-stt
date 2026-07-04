@@ -8,16 +8,13 @@ contract and README.md for usage.
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import os
 import pathlib
-import re
 import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tomllib
@@ -418,59 +415,6 @@ def export_task(client: httpx.Client, task_id: str, fmt: str, lang_code: str | N
     return r.content
 
 
-# --- temp-email --------------------------------------------------------
-
-def temp_email_create(name: str | None = None,
-                      cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Create a cloudflare_temp_email address; admin path first, user path fallback."""
-    cfg = cfg or temp_email_config()
-    if not cfg["base_url"] or not cfg["domain"]:
-        raise SystemExit("temp_email.base_url and temp_email.domain are required")
-    base = str(cfg["base_url"]).rstrip("/")
-    # cloudflare_temp_email v1.9 requires name even on the admin API.
-    local = name or ("el" + secrets.token_hex(5))
-    body = {"name": local, "domain": cfg["domain"], "cf_token": "",
-            "enableRandomSubdomain": False}
-
-    with httpx.Client(timeout=30) as client:
-        if cfg.get("use_admin_path", True) and cfg.get("admin_password"):
-            r = client.post(f"{base}/admin/new_address", json=body,
-                            headers={"x-admin-auth": cfg["admin_password"]})
-            if r.status_code < 400:
-                return r.json()
-            if r.status_code not in (401, 403):
-                raise SystemExit(f"temp-email create failed ({r.status_code}): {r.text[:300]}")
-
-        headers = {}
-        if cfg.get("site_password"):
-            headers["x-custom-auth"] = cfg["site_password"]
-        r = client.post(f"{base}/api/new_address", json=body, headers=headers)
-        if r.status_code >= 400:
-            raise SystemExit(f"temp-email create failed ({r.status_code}): {r.text[:300]}")
-        return r.json()
-
-
-def latest_verify_link(addr_jwt: str, cfg: dict[str, Any] | None = None) -> str:
-    """Return newest ElevenLabs verification link from a temp mailbox."""
-    cfg = cfg or temp_email_config()
-    base = str(cfg["base_url"]).rstrip("/")
-    deadline = time.time() + float(cfg["poll_timeout_secs"])
-    headers = {"Authorization": f"Bearer {addr_jwt}"}
-    with httpx.Client(timeout=30) as client:
-        while time.time() < deadline:
-            r = client.get(f"{base}/api/parsed_mails", params={"limit": 20, "offset": 0},
-                           headers=headers)
-            if r.status_code >= 400:
-                raise SystemExit(f"temp-email poll failed ({r.status_code}): {r.text[:300]}")
-            for mail in r.json().get("results", []):
-                text = html.unescape("\n".join(str(mail.get(k) or "") for k in ("text", "html")))
-                match = re.search(r"https://elevenlabs\.io/app/action\?[^\s\"<>]+oobCode=[^\s\"<>]+", text)
-                if match:
-                    return match.group(0)
-            time.sleep(float(cfg["poll_interval_secs"]))
-    raise SystemExit("timed out waiting for ElevenLabs verification email")
-
-
 # --- credits / selection ----------------------------------------------
 
 def estimate_required(duration: float | None) -> int | None:
@@ -550,241 +494,6 @@ def _tlog(msg: str) -> None:
     (TRANSCRIBE_LOG or (lambda m: print(f"[stt] {m}", file=sys.stderr)))(msg)
 
 
-def register_one() -> dict[str, Any]:
-    """Create one ElevenLabs account via temp-mail + real Chrome, then return account."""
-    try:
-        import pyautogui, pyperclip, pygetwindow as gw
-    except ImportError:
-        raise SystemExit("auto-register needs pyautogui pyperclip pygetwindow")
-
-    _rlog("创建临时邮箱...")
-    addr = temp_email_create()
-    email = addr["address"]
-    _rlog(f"临时邮箱已创建: {email}")
-    password = random_password()
-    chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    profile_dir = tempfile.mkdtemp(prefix="elevenlabs-stt-chrome-")
-    prefs_path = pathlib.Path(profile_dir) / "Default" / "Preferences"
-    prefs_path.parent.mkdir(parents=True, exist_ok=True)
-    prefs_path.write_text(json.dumps({
-        "credentials_enable_service": False,
-        "profile": {"password_manager_enabled": False},
-    }), encoding="utf-8")
-
-    # ponytail: fresh profile per account avoids logged-in Chrome redirecting sign-up to onboarding.
-    # Coordinates are ugly, but selector automation triggers hCaptcha; real Chrome doesn't.
-    def profile_window_handles() -> set[int]:
-        if not shutil.which("powershell"):
-            return set()
-        profile_name = pathlib.Path(profile_dir).name.replace("'", "''")
-        ps = (
-            f"$profile = '{profile_name}'; "
-            "$pids = @(Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
-            "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) } | "
-            "Select-Object -ExpandProperty ProcessId); "
-            "if ($pids.Count -gt 0) { "
-            "Get-Process -Id $pids -ErrorAction SilentlyContinue | "
-            "Where-Object { $_.MainWindowHandle -ne 0 } | "
-            "ForEach-Object { $_.MainWindowHandle } "
-            "}"
-        )
-        try:
-            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                                 capture_output=True, text=True, timeout=3)
-        except Exception:
-            return set()
-        handles: set[int] = set()
-        for line in out.stdout.splitlines():
-            try:
-                handles.add(int(line.strip()))
-            except ValueError:
-                pass
-        return handles
-
-    chrome_startup_kwargs = {}
-    if os.name == "nt":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 1  # SW_SHOWNORMAL: do not inherit a hidden Web UI process state.
-        chrome_startup_kwargs = {
-            "startupinfo": startupinfo,
-            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-        }
-    proc = None
-    try:
-        _rlog("启动临时 Chrome...")
-        proc = subprocess.Popen([
-            chrome,
-            f"--user-data-dir={profile_dir}",
-            "--no-first-run",
-            "--new-window",
-            "--window-position=40,40",
-            "--disable-save-password-bubble",
-            "--do-not-de-elevate",
-            "https://elevenlabs.io/app/sign-up",
-        ], **chrome_startup_kwargs)
-        new_window = None
-        _rlog("等待临时 Chrome 窗口出现（最长 30s）...")
-        # 30s: a brand-new profile cold-starts slowly (profile init + AV scan); 10s
-        # missed the window on busy machines and the finally-block killed late Chrome.
-        deadline = time.time() + 30
-        next_profile_probe = 0.0
-        while time.time() < deadline and new_window is None:
-            time.sleep(0.5)
-            profile_handles = set()
-            if time.time() >= next_profile_probe:
-                profile_handles = profile_window_handles()
-                next_profile_probe = time.time() + 1.0
-            for w in gw.getAllWindows():
-                hwnd = getattr(w, "_hWnd", None)
-                if hwnd in profile_handles:
-                    new_window = w
-                    break
-        if new_window is None:
-            raise SystemExit("auto-register could not find the new temporary Chrome window; aborting")
-
-        def window_op(name: str) -> None:
-            try:
-                getattr(new_window, name)()
-            except Exception as e:
-                # pygetwindow/pywin32 can report Windows error code 0 ("success")
-                # after the window operation actually completed. Treat only that
-                # wrapper bug as non-fatal; real focus/window errors should abort.
-                if "Error code from Windows: 0" not in str(e):
-                    raise
-
-        def ensure_window_foreground() -> None:
-            hwnd = getattr(new_window, "_hWnd", None)
-            if not hwnd or os.name != "nt":
-                window_op("activate")
-                return
-            import ctypes
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-            # Fast path: already foreground. Forcing anyway is what caused the
-            # constant restore/maximize flicker between every automation action.
-            if user32.GetForegroundWindow() == hwnd:
-                return
-            SW_RESTORE = 9
-            HWND_TOPMOST = -1
-            HWND_NOTOPMOST = -2
-            SWP_NOSIZE = 0x0001
-            SWP_NOMOVE = 0x0002
-            SWP_SHOWWINDOW = 0x0040
-            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
-            for attempt in range(8):
-                if user32.IsIconic(hwnd):
-                    user32.ShowWindow(hwnd, SW_RESTORE)
-                # AttachThreadInput to the current foreground thread satisfies
-                # Windows' foreground-lock rules. A synthetic Alt tap also works
-                # but toggles Chrome's menu-accelerator mode, breaking in-window
-                # keyboard focus for the very keys we send next.
-                fg = user32.GetForegroundWindow()
-                fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
-                cur_tid = kernel32.GetCurrentThreadId()
-                attached = fg_tid and fg_tid != cur_tid and user32.AttachThreadInput(cur_tid, fg_tid, True)
-                try:
-                    user32.BringWindowToTop(hwnd)
-                    user32.SetForegroundWindow(hwnd)
-                    if attempt >= 4:  # last resort: topmost toggle
-                        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
-                        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
-                finally:
-                    if attached:
-                        user32.AttachThreadInput(cur_tid, fg_tid, False)
-                time.sleep(0.2)
-                if user32.GetForegroundWindow() == hwnd:
-                    return
-            raise SystemExit("auto-register could not focus the temporary Chrome window; aborting before sending keys")
-
-        # Foreground the temp Chrome immediately, before any page-load waits.
-        # pygetwindow's activate() is silently denied when we are a background
-        # process, which left the window behind for ~16s until the first click
-        # forced it forward and the key/click sequence landed out of sync.
-        _rlog("窗口已找到，置顶并等待页面渲染...")
-        window_op("restore")
-        window_op("maximize")
-        ensure_window_foreground()
-        time.sleep(4)
-
-        def hotkey(*keys: str) -> None:
-            ensure_window_foreground()
-            pyautogui.hotkey(*keys)
-
-        def press(key: str) -> None:
-            ensure_window_foreground()
-            pyautogui.press(key)
-
-        def click_frac(x_frac: float, y_frac: float) -> None:
-            ensure_window_foreground()
-            x = new_window.left + int(new_window.width * x_frac)
-            y = new_window.top + int(new_window.height * y_frac)
-            if x < 0 or y < 0:
-                # A minimized window reports -32000 geometry; pyautogui clamps the
-                # click to (0,0), which hits Chrome's tab-search chevron.
-                raise SystemExit("auto-register got bad temp Chrome window geometry; aborting")
-            pyautogui.click(x, y)
-            time.sleep(0.1)
-
-        def paste(text: str) -> None:
-            ensure_window_foreground()
-            pyperclip.copy(text)
-            pyautogui.hotkey("ctrl", "v")
-
-        # Chrome already opened /app/sign-up from its command line; just wait
-        # for the app to render instead of re-navigating (visible reload).
-        time.sleep(12)
-
-        _rlog("填写注册表单...")
-        click_frac(0.50, 0.56)  # signup email
-        hotkey("ctrl", "a"); paste(email)
-        press("tab"); paste(password)
-        press("enter")
-
-        _rlog(f"等待验证邮件（最长 {temp_email_config()['poll_timeout_secs']}s）...")
-        link = latest_verify_link(addr["jwt"])
-        _rlog("打开验证链接并确认...")
-        hotkey("ctrl", "l")
-        paste(link)
-        press("enter")
-        time.sleep(15)
-        press("enter")  # modal Continue if focused
-        click_frac(0.50, 0.62)
-        click_frac(0.65, 0.62)  # verification modal Continue fallback
-        time.sleep(8)
-        _rlog("用新账号登录...")
-        click_frac(0.50, 0.62)  # sign-in email
-        hotkey("ctrl", "a"); paste(email)
-        press("tab"); paste(password)
-        press("enter")
-        time.sleep(15)
-
-        _rlog("拉取账号积分...")
-        account = account_from_password_signin(email, password, temp_address=email)
-        with authed_client(account, save=lambda _s: None) as client:
-            client.get("/v1/user")
-            refresh_credits(account, client)
-        _rlog(f"注册完成: {email}，剩余积分 {cached_remaining(account)}")
-        return account
-    finally:
-        if shutil.which("powershell"):
-            profile_name = pathlib.Path(profile_dir).name.replace("'", "''")
-            subprocess.run([
-                "powershell", "-NoProfile", "-Command",
-                f"$profile = '{profile_name}'; "
-                "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
-                "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) } | "
-                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif proc is not None:
-            proc.terminate()
-        for _ in range(5):
-            shutil.rmtree(profile_dir, ignore_errors=True)
-            if not pathlib.Path(profile_dir).exists():
-                break
-            time.sleep(0.5)
-
-
 def fresh_count(store: dict[str, Any], threshold: int) -> int:
     return sum(1 for a in store["accounts"]
                if not a.get("invalid") and (cached_remaining(a) or 0) >= threshold)
@@ -833,6 +542,7 @@ def refill_pool(store: dict[str, Any], config_path: pathlib.Path) -> None:
     acfg = accounts_config(config_path)
     if not acfg["auto_refill"] or not has_temp_email_config(config_path):
         return
+    from register import register_one  # lazy: register.py imports stt back
     active = store.get("active")
     while fresh_count(store, acfg["fresh_threshold"]) < acfg["pool_target"]:
         _rlog("账号池低于目标，注册补充账号...")
@@ -1082,7 +792,7 @@ def _stagger_wait(stagger_secs: float, clock=time.monotonic, sleep=time.sleep) -
 
 
 def run_plan_pipelined(plan, cfg, store, config_path, output_for, register_count=0,
-                       register_fn=register_one, on_start=None, on_done=None,
+                       register_fn=None, on_start=None, on_done=None,
                        on_active=None, refresh_used=True,
                        transcribe_fn=None) -> tuple[list, list]:
     """按账号分组并发执行转录计划；缺口账号边注册边投产（流水线）。
@@ -1102,6 +812,8 @@ def run_plan_pipelined(plan, cfg, store, config_path, output_for, register_count
     返回 (results, used)：results 按 plan 原顺序，(inp, email, "OK"|"FAIL", detail) 契约不变。
     """
     total = len(plan)
+    if register_count and register_fn is None:  # lazy: register.py imports stt back
+        from register import register_one as register_fn
     existing_groups, pending = group_plan(plan)
     results_by_idx: dict[int, tuple] = {}
     used: list[dict[str, Any]] = []
@@ -1502,250 +1214,6 @@ def cmd_list_languages(args: argparse.Namespace) -> int:
     return 0
 
 
-def _selfcheck() -> int:
-    """Minimal runnable self-check (no network)."""
-    cfg = load_config(pathlib.Path("config.example.toml"))
-    assert cfg["include_subtitles"] is True, "script default include_subtitles must be ON"
-    assert cfg["tag_audio_events"] is True
-    assert cfg["max_concurrency"] == 4 and cfg["stagger_secs"] == 2.0  # 并发默认值（AC4）
-    assert DEFAULTS["max_concurrency"] == 4 and DEFAULTS["stagger_secs"] == 2.0
-    assert resolve_language("auto") is None
-    assert resolve_language("English") == "eng"
-    assert resolve_language("eng") == "eng"
-    assert resolve_language("zho") == "zho"
-    # multipart field builder sanity (no upload)
-    opts = dict(cfg); opts["language_code"] = None; opts["vocab"] = ["a", "b"]
-    data = {"task_name": "x", "model_id": "scribe_v2",
-            "tag_audio_events": "true", "include_subtitles": "true", "keyterms": ["a", "b"]}
-    assert data["keyterms"] == ["a", "b"]
-    # multi-account config sections + migration shape
-    tcfg = temp_email_config(pathlib.Path("config.example.toml"))
-    assert tcfg["poll_interval_secs"] == 3 and tcfg["use_admin_path"] is True
-    acfg = accounts_config(pathlib.Path("config.example.toml"))
-    assert acfg["selection_margin"] == 1.2 and acfg["pool_target"] == 3
-    acct = _session_to_account(
-        {"email": "a@b.c", "refreshToken": "rt", "localId": "uid", "jwt": "j", "jwt_exp": 0},
-        source="manual")
-    assert acct["source"] == "manual" and acct["email"] == "a@b.c" and acct["invalid"] is False
-    # selection: best-fit + margin (offline via fresh credits_known cache; no network)
-    now = time.time()
-    fake = [
-        {"email": "a", "invalid": False, "credits_known": {"limit": 10000, "count": 9000, "fetched_at": now}},
-        {"email": "b", "invalid": False, "credits_known": {"limit": 10000, "count": 0, "fetched_at": now}},
-        {"email": "c", "invalid": True,  "credits_known": {"limit": 10000, "count": 0, "fetched_at": now}},
-    ]
-    fstore = {"accounts": fake, "active": "a"}
-    assert cached_remaining(fake[0]) == 1000 and cached_remaining(fake[1]) == 10000
-    pw = random_password()
-    assert len(pw) >= 8 and any(c.isdigit() for c in pw) and any(not c.isalnum() for c in pw)
-    assert fresh_count(fstore, 10000) == 1 and fresh_count(fstore, 1000) == 2
-    # allocate: bin-packing best-fit, existing-first, exact shortfall (offline via credits_known)
-    aa = {"email": "a", "invalid": False, "credits_known": {"limit": 1000, "count": 0, "fetched_at": now}}
-    # b sized so 7000 can't fit it (forces a NEW bin) while 5000+400 do (design mapping).
-    bb = {"email": "b", "invalid": False, "credits_known": {"limit": 6000, "count": 0, "fetched_at": now}}
-    astore = {"accounts": [aa, bb], "active": "a"}
-    # margin 1.0 so need == required; files needing [800, 5000, 7000, 400]
-    plan, reg = allocate([("f800", 800), ("f5000", 5000), ("f7000", 7000), ("f400", 400)],
-                         [aa, bb], margin=1.0, fresh_threshold=10000, store=astore)
-    pd = {f: acct for f, acct in plan}
-    # 7000 fits no existing account (a=1000, b=6000) -> its own fresh bin, exactly one shortfall.
-    assert pd["f7000"] == "NEW#0", "7000 -> fresh bin"
-    assert reg == 1, f"register_count should be 1, got {reg}"
-    # the three that fit are packed onto existing accounts (best-fit, existing-first).
-    assert all(pd[f] in (aa, bb) for f in ("f800", "f5000", "f400")), "small files packed onto existing"
-    # no account over-committed beyond its remaining (with margin 1.0, need == required).
-    used = {"a": 0, "b": 0}
-    for f, req in [("f800", 800), ("f5000", 5000), ("f400", 400)]:
-        used[pd[f]["email"]] += req
-    assert used["a"] <= 1000 and used["b"] <= 6000, f"over-commit: {used}"
-    # existing-account files ordered before the NEW file (AC3)
-    new_idx = next(i for i, (f, acct) in enumerate(plan) if isinstance(acct, str))
-    assert all(not isinstance(acct, str) for f, acct in plan[:new_idx]), "existing before NEW"
-    # unknown-duration file -> own fresh bin, increments register_count
-    plan2, reg2 = allocate([("fu", None)], [aa, bb], margin=1.0, fresh_threshold=10000, store=astore)
-    assert reg2 == 1 and plan2[0][1] == "NEW#0", "unknown duration -> own NEW bin"
-    # a single file bigger than one fresh account -> out-of-scope guard raises
-    try:
-        allocate([("big", 20000)], [aa, bb], margin=1.0, fresh_threshold=10000, store=astore)
-        assert False, "oversize file should raise"
-    except SystemExit:
-        pass
-    # pack_bins: 纯核心与 allocate 同规则；oversize 收集而非 raise
-    r = pack_bins([("f800", 800), ("f5000", 5000), ("f7000", 7000), ("f400", 400)],
-                  [("a", 1000), ("b", 6000)], margin=1.0, fresh_threshold=10000)
-    assert r["register_count"] == 1 and dict(r["assignments"])["f7000"] == "NEW#0"
-    assert [b["is_new"] for b in r["bins"]] == sorted(b["is_new"] for b in r["bins"]), \
-        "existing bins before NEW bins"
-    for b in r["bins"]:
-        assert b["is_new"] or b["use"] <= b["before"], f"over-commit: {b}"
-    r2 = pack_bins([("big", 20000)], [("a", 1000)], 1.0, 10000)
-    assert r2["oversize"] == [("big", 20001)] and r2["assignments"] == []
-    r3 = pack_bins([("fu", None)], [("a", 1000)], 1.0, 10000)
-    assert r3["register_count"] == 1 and dict(r3["assignments"])["fu"] == "NEW#0"
-    assert r3["bins"][-1]["use"] == 0 and r3["bins"][-1]["before"] == 0  # unknown req 不计 use
-    # --- 并发流水线纯逻辑（AC7；全部离线） -------------------------------------
-    # group_plan: existing 按账号聚组保序、NEW#k 按槽位分组
-    p1, p2, p3 = (pathlib.Path(n) for n in ("p1.mp3", "p2.mp3", "p3.mp3"))
-    egroups, pending = group_plan([(p1, aa), (p2, bb), (p3, aa), (pathlib.Path("p4.mp3"), "NEW#0")])
-    assert [(acct["email"], [i for i, _ in items]) for acct, items in egroups] == \
-        [("a", [0, 2]), ("b", [1])], "同账号聚为一组且保 plan 序"
-    assert {k: [i for i, _ in v] for k, v in pending.items()} == {0: [3]}
-
-    # stagger 闸：0 短路；两次取号间隔 >= stagger_secs（注入时钟，无真实 sleep）
-    global _GATE_NEXT, REGISTER_LOG, TRANSCRIBE_LOG
-    _GATE_NEXT = 0.0
-    assert _stagger_wait(0) == 0.0
-    slept: list[float] = []
-    w1 = _stagger_wait(2.0, clock=lambda: 100.0, sleep=slept.append)
-    w2 = _stagger_wait(2.0, clock=lambda: 100.0, sleep=slept.append)
-    assert w1 == 0.0 and w2 == 2.0 and slept == [0.0, 2.0], (w1, w2, slept)
-    _GATE_NEXT = 0.0
-
-    # run_plan_pipelined: 假账号 + transcribe 桩；注册第 2 个失败 → 该槽位 FAIL，
-    # 已提交组与已注册槽位不受影响；results 保 plan 序（R7 流水线新分支）
-    global ACCOUNTS_PATH
-    real_accounts_path = ACCOUNTS_PATH
-    ACCOUNTS_PATH = pathlib.Path(tempfile.mkdtemp(prefix="stt-selfcheck-")) / "accounts.json"
-    try:
-        reg_calls: list[int] = []
-
-        def reg_stub():
-            reg_calls.append(1)
-            if len(reg_calls) == 1:
-                return {"email": "n0", "invalid": False, "created_at": now,
-                        "credits_known": {"limit": 10000, "count": 0, "fetched_at": now}}
-            raise RuntimeError("boom")
-
-        def trans_stub(inp, _cfg, account, _store, _cfgpath, output):
-            return pathlib.Path(str(inp) + ".srt")
-
-        pstore = {"accounts": [dict(aa)], "active": "a"}
-        pplan = [(p1, pstore["accounts"][0]), (p2, "NEW#0"), (p3, "NEW#1")]
-        done_flags: list[bool] = []
-        plog: list[str] = []
-        TRANSCRIBE_LOG = REGISTER_LOG = plog.append  # 静音测试期间的进度行
-        try:
-            res, pused = run_plan_pipelined(
-                pplan, {"max_concurrency": 2, "stagger_secs": 0}, pstore,
-                pathlib.Path("config.example.toml"), output_for=lambda _i: None,
-                register_count=2, register_fn=reg_stub, transcribe_fn=trans_stub,
-                refresh_used=False, on_done=lambda _i, ok: done_flags.append(ok))
-        finally:
-            TRANSCRIBE_LOG = REGISTER_LOG = None
-        assert any("注册失败" in l for l in plog), plog
-        assert [r[0] for r in res] == [p1, p2, p3], "results 按 plan 原顺序聚合"
-        assert res[0][2] == "OK" and res[1][2] == "OK" and res[1][1] == "n0", res
-        assert res[2][2] == "FAIL" and "注册失败" in res[2][3], "未注册槽位标 FAIL 带原因"
-        assert {a["email"] for a in pstore["accounts"]} == {"a", "n0"}, "注册成功的账号已入 store"
-        assert ACCOUNTS_PATH.exists(), "注册成功即落盘"
-        assert len(done_flags) == 3 and done_flags.count(False) == 1, done_flags
-        assert {a.get("email") for a in pused} == {"a", "n0"}
-    finally:
-        shutil.rmtree(ACCOUNTS_PATH.parent, ignore_errors=True)
-        ACCOUNTS_PATH = real_accounts_path
-
-    # --- audio_split pure logic (offline; AC7) --------------------------------
-    # default_chunk_secs: chunk fits one fresh account within margin
-    assert audio_split.default_chunk_secs(10000, 13.9, 1.2) == 569
-    # timestamp parse/fmt round-trip (srt comma-ms, vtt dot-ms)
-    assert audio_split.fmt_ts_srt(3661.5) == "01:01:01,500"
-    assert audio_split.fmt_ts_vtt(3661.5) == "01:01:01.500"
-    assert abs(audio_split.parse_ts_srt("01:01:01,500") - 3661.5) < 1e-6
-    assert abs(audio_split.parse_ts_vtt("01:01:01.500") - 3661.5) < 1e-6
-    # plan_cuts: latest silence midpoint in window; MIN_SEG(5s) filters near-start cand
-    segs, hard = audio_split.plan_cuts(500.0, 300.0, [3.0, 100.0, 250.0, 280.0])
-    assert segs == [(0.0, 280.0), (280.0, 500.0)], segs  # 280 = latest cand <= 300; 3 filtered
-    assert hard == [False, False]
-    assert all(e - s <= 300.0 + 1e-9 for s, e in segs)
-    # plan_cuts hard-cut fallback when no silence candidate
-    segs2, hard2 = audio_split.plan_cuts(700.0, 300.0, [])
-    assert segs2 == [(0.0, 300.0), (300.0, 600.0), (600.0, 700.0)], segs2
-    assert hard2 == [True, True, False]
-    # plan_cuts_skip: silences >= skip_min are dropped, short ones untouched (AC1)
-    sil = [(50.0, 65.0), (200.0, 201.0), (400.0, 412.0)]  # 15s + 1s + 12s, skip_min=10
-    sk, skh = audio_split.plan_cuts_skip(500.0, 300.0, sil, 10.0)
-    pad = audio_split.SKIP_EDGE_PAD
-    # middle voiced region (64.5..400.5 = 336s > 300) greedy-splits at the 1s-silence midpoint
-    assert sk == [(0.0, 50.0 + pad), (65.0 - pad, 200.5), (200.5, 400.0 + pad),
-                  (412.0 - pad, 500.0)], sk
-    assert len(skh) == len(sk)
-    for a, b in sk:  # every segment <= chunk_secs, absolute coords inside [0, total]
-        assert 0.0 <= a < b <= 500.0 and b - a <= 300.0 + 1e-9, (a, b)
-    for s, e in [(50.0, 65.0), (400.0, 412.0)]:  # long silences fully skipped (pad aside)
-        assert not any(a < (s + e) / 2 < b for a, b in sk), (s, e, sk)
-    skipped_total = 500.0 - sum(b - a for a, b in sk)
-    assert abs(skipped_total - (15.0 + 12.0 - 4 * pad)) < 1e-6, skipped_total
-    # >= boundary: a silence exactly skip_min long is skipped
-    skb, _ = audio_split.plan_cuts_skip(100.0, 300.0, [(40.0, 50.0)], 10.0)
-    assert skb == [(0.0, 40.0 + pad), (50.0 - pad, 100.0)], skb
-    # no long silence: byte-identical to plan_cuts on the midpoints
-    same = audio_split.plan_cuts_skip(500.0, 300.0, [(99.0, 101.0), (249.0, 251.0), (279.0, 281.0)], 10.0)
-    assert same == audio_split.plan_cuts(500.0, 300.0, [100.0, 250.0, 280.0]), same
-    # all-silence audio -> empty plan; leading/trailing long silence -> degenerate dropped
-    assert audio_split.plan_cuts_skip(60.0, 300.0, [(0.0, 60.0)], 10.0) == ([], [])
-    ends, _ = audio_split.plan_cuts_skip(100.0, 300.0, [(0.0, 20.0), (80.0, 100.0)], 10.0)
-    assert ends == [(20.0 - pad, 80.0 + pad)], ends
-    # long voiced region still greedy-splits on the short silences inside it
-    lsil = [(0.0, 30.0), (250.0, 251.0)]
-    lsk, lskh = audio_split.plan_cuts_skip(700.0, 300.0, lsil, 10.0)
-    assert all(b - a <= 300.0 + 1e-9 for a, b in lsk), lsk
-    assert lsk[0] == (30.0 - pad, 250.5), lsk  # cut at the short-silence midpoint
-    # merge_srt: offset correction + start-sort + contiguous renumber from 1
-    c0 = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
-    c1 = "1\n00:00:00,500 --> 00:00:01,500\nworld\n"
-    m = audio_split.merge_srt([(0.0, c0), (100.0, c1)])
-    assert m.startswith("1\n"), m
-    assert "\n2\n" in m and m.count("-->") == 2
-    assert "00:01:40,500 --> 00:01:41,500" in m  # world offset by 100s
-    assert "hello" in m and "world" in m
-    # merge_vtt: single WEBVTT header, offset + renumber
-    v0 = "WEBVTT\n\ncue-1\n00:00:00.000 --> 00:00:01.000\nhi\n"
-    v1 = "WEBVTT\n\ncue-1\n00:00:02.000 --> 00:00:03.000\nbye\n"
-    mv = audio_split.merge_vtt([(0.0, v0), (10.0, v1)])
-    assert mv.count("WEBVTT") == 1, mv
-    assert "00:00:12.000 --> 00:00:13.000" in mv  # bye offset by 10s
-    assert "\n1\n" in mv and "\n2\n" in mv
-    # merge_txt: segment-order concatenation
-    assert audio_split.merge_txt([(0.0, "alpha"), (5.0, "beta")]) == "alpha\n\nbeta\n"
-
-    # REGISTER_LOG hook: collector receives _rlog lines; None default restored
-    got: list[str] = []
-    REGISTER_LOG = got.append
-    try:
-        _rlog("hook-test")
-    finally:
-        REGISTER_LOG = None
-    assert got == ["hook-test"], got
-
-    # TRANSCRIBE_LOG hook: same contract as REGISTER_LOG
-    tgot: list[str] = []
-    TRANSCRIBE_LOG = tgot.append
-    try:
-        _tlog("t-hook-test")
-    finally:
-        TRANSCRIBE_LOG = None
-    assert tgot == ["t-hook-test"], tgot
-
-    # filter_accounts: empty emails → all non-invalid; manual limits; unknown raises
-    cand, manual = filter_accounts(fstore, [])
-    assert manual is False and [a["email"] for a in cand] == ["a", "b"]
-    cand, manual = filter_accounts(fstore, ["b"])
-    assert manual is True and [a["email"] for a in cand] == ["b"]
-    try:
-        filter_accounts(fstore, ["b", "nobody@x.y"])
-        assert False, "unknown email should raise"
-    except SystemExit as e:
-        assert "nobody@x.y" in str(e)
-    try:
-        filter_accounts(fstore, ["c"])  # invalid account is not a candidate
-        assert False, "invalid email should raise"
-    except SystemExit:
-        pass
-
-    print("selfcheck ok")
-    return 0
-
-
 # --- account / pool subcommands ---------------------------------------
 
 def cmd_accounts(args: argparse.Namespace) -> int:
@@ -1795,6 +1263,7 @@ def cmd_pool(args: argparse.Namespace) -> int:
 
 
 def cmd_pool_warm(args: argparse.Namespace) -> int:
+    from register import register_one  # lazy: register.py imports stt back
     store = load_accounts()
     acfg = accounts_config(pathlib.Path(args.config))
     target = args.target or acfg["pool_target"]
@@ -1911,7 +1380,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "list-languages":
         return cmd_list_languages(args)
     if args.cmd == "selfcheck":
-        return _selfcheck()
+        from selfcheck import run  # lazy: selfcheck.py imports stt back
+        return run()
     if args.cmd == "accounts":
         return cmd_accounts(args)
     if args.cmd == "pool":

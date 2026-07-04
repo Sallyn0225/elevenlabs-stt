@@ -17,4 +17,4 @@ jobs:
       # py_compile parses without importing, so the GUI-only deps
       # (pyautogui/pygetwindow, absent on Linux) are not required here.
       - name: Compile-check Python sources
-        run: python -m py_compile stt.py web.py audio_split.py
+        run: python -m py_compile stt.py web.py audio_split.py register.py selfcheck.py

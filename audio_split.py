@@ -3,7 +3,7 @@
 
 Pure logic (chunk sizing, greedy cut planning, timestamp parse/format, srt/vtt/txt
 merge) is decoupled from the network/account layer so it is offline-unit-testable
-(see stt.py::_selfcheck). ffmpeg is only touched by detect_silences/cut_segments.
+(see selfcheck.py). ffmpeg is only touched by detect_silences/cut_segments.
 
 Design: .trellis/tasks/07-02-audio-silence-split/design.md
 """

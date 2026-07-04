@@ -23,6 +23,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audio_split
+import register
 import stt
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -288,7 +289,7 @@ def do_register(target: int | None) -> dict:
         _REG_PROGRESS["total"] = max(0, tgt - fresh)
         while fresh < tgt:
             _reg_log(f"账号池 {fresh}/{tgt}，开始注册第 {_REG_PROGRESS['done'] + 1} 个账号")
-            account = stt.register_one()
+            account = register.register_one()
             with _LOCK:
                 stt.upsert_account(store, account)
                 stt.save_accounts(store)
