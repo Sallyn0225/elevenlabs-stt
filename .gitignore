@@ -21,3 +21,7 @@ __pycache__/
 
 # Claude Design handoff bundle (transient import artifact)
 *-handoff.zip
+
+# Trellis internal dev workspace (specs, task archives, journals, framework
+# scaffold) — kept local, not published. Scrub from history before going public.
+.trellis/
