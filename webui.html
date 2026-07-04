@@ -57,8 +57,9 @@ input{font-family:inherit;letter-spacing:inherit}
 <script>
 // ------------------------------------------------------------------ themes
 const THEMES = {
-  light:{'--bg':'#fafafa','--panel':'#ffffff','--muted':'#f2f2f2','--muted2':'#fafafa','--border':'#ebebeb','--fg':'#171717','--mut-fg':'#5c5c5c','--accent':'#171717','--accent-fg':'#ffffff','--green':'#297a3a','--red':'#e5484d','--amber':'#b45309','--track':'#ebebeb','--shadow':'0 1px 2px rgba(0,0,0,.05)'},
-  dark:{'--bg':'#0a0a0a','--panel':'#151515','--muted':'#1f1f1f','--muted2':'#141414','--border':'#2a2a2a','--fg':'#ededed','--mut-fg':'#a1a1a1','--accent':'#ededed','--accent-fg':'#0a0a0a','--green':'#45dec5','--red':'#e5484d','--amber':'#eec32d','--track':'#2a2a2a','--shadow':'0 1px 2px rgba(0,0,0,.4)'},
+  // --red 用于填充/进度条;--red-fg 是文字/边框态,浅色下压深以达 4.5:1(深色 --red 已达标,保持一致)
+  light:{'--bg':'#fafafa','--panel':'#ffffff','--muted':'#f2f2f2','--muted2':'#fafafa','--border':'#ebebeb','--fg':'#171717','--mut-fg':'#5c5c5c','--accent':'#171717','--accent-fg':'#ffffff','--green':'#297a3a','--red':'#e5484d','--red-fg':'#c2333a','--amber':'#b45309','--track':'#ebebeb','--shadow':'0 1px 2px rgba(0,0,0,.05)'},
+  dark:{'--bg':'#0a0a0a','--panel':'#151515','--muted':'#1f1f1f','--muted2':'#141414','--border':'#2a2a2a','--fg':'#ededed','--mut-fg':'#a1a1a1','--accent':'#ededed','--accent-fg':'#0a0a0a','--green':'#45dec5','--red':'#e5484d','--red-fg':'#e5484d','--amber':'#eec32d','--track':'#2a2a2a','--shadow':'0 1px 2px rgba(0,0,0,.4)'},
 };
 function applyTheme(name){const t=THEMES[name]||THEMES.light;const r=document.documentElement.style;Object.keys(t).forEach(k=>r.setProperty(k,t[k]))}
 
@@ -432,11 +433,11 @@ function accountsView(){
     const sel=S.selected.includes(a.email), rev=S.revealed.includes(a.email);
     const pct=a.rem!=null&&a.limit?Math.round((a.rem/a.limit)*100):0;
     const statusText={fresh:'满额',partial:'部分可用',depleted:'已用尽',invalid:'失效',unknown:'未知'}[a.status]||a.status;
-    const statusColor={fresh:'var(--green)',partial:'var(--amber)',depleted:'var(--red)',invalid:'var(--red)',unknown:'var(--mut-fg)'}[a.status]||'var(--mut-fg)';
+    const statusColor={fresh:'var(--green)',partial:'var(--amber)',depleted:'var(--red-fg)',invalid:'var(--red-fg)',unknown:'var(--mut-fg)'}[a.status]||'var(--mut-fg)';
     const barColor=a.rem===0?'var(--red)':pct<30?'var(--amber)':'var(--accent)';
     const pw=a.password?(rev?a.password:'••••••••••'):'—';
     return `<div class="acct-row" style="display:flex;align-items:center;gap:15px;padding:15px 17px;border-radius:6px;background:var(--panel,#fff);${sel?'border:1px solid var(--fg)':'border:1px solid var(--border)'}">
-      <div data-act="toggleSel" data-arg="${esc(a.email)}" style="${cbBox(sel)}">${CHECK}</div>
+      <div data-act="toggleSel" data-arg="${esc(a.email)}" role="checkbox" aria-checked="${sel}" aria-label="选择账号 ${esc(a.email)}" style="${cbBox(sel)}">${CHECK}</div>
       <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;color:var(--mut-fg)">${esc((a.email||'?')[0].toUpperCase())}</div>
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
@@ -465,7 +466,7 @@ function accountsView(){
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <button data-act="refreshSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12.5px;font-weight:500;cursor:pointer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>刷新额度</button>
         <button data-act="exportSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12.5px;font-weight:500;cursor:pointer">导出 (.json)</button>
-        <button data-act="delSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--red);background:var(--panel,#fff);color:var(--red);font-size:12.5px;font-weight:500;cursor:pointer">删除</button>
+        <button data-act="delSel" style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:6px;border:1px solid var(--red-fg);background:var(--panel,#fff);color:var(--red-fg);font-size:12.5px;font-weight:500;cursor:pointer">删除</button>
         <button data-act="clearSel" style="padding:7px 12px;border-radius:6px;border:none;background:transparent;color:var(--mut-fg);font-size:12.5px;cursor:pointer">取消</button>
       </div></div>` : '';
 
@@ -505,7 +506,7 @@ function accountsView(){
       <button data-act="toggleDir" style="display:flex;align-items:center;gap:7px;height:40px;padding:0 13px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;cursor:pointer">${S.sortDir==='asc'?'↑':'↓'}<span style="color:var(--mut-fg)">${S.sortDir==='asc'?'升序':'降序'}</span></button>
     </div>
     <div style="display:flex;align-items:center;gap:13px;padding:0 4px">
-      <div data-act="toggleAll" style="${cbBox(allSel)}">${CHECK}</div>
+      <div data-act="toggleAll" role="checkbox" aria-checked="${allSel}" aria-label="全选本页账号" style="${cbBox(allSel)}">${CHECK}</div>
       <span style="font-size:12.5px;color:var(--mut-fg)">全选本页 · 共 ${accts.length} 个账号</span>
       ${S.revealed.length?`<button data-act="hideAllPw" style="display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12px;font-weight:500;cursor:pointer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>隐藏 ${S.revealed.length} 个已显示密码</button>`:''}
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
