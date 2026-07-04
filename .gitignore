@@ -3,6 +3,7 @@
 .codex/
 .agents/
 .pi/
+.impeccable/
 
 # STT script runtime artifacts (creds / local config / temp)
 session.json
