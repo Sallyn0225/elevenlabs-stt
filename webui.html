@@ -17,8 +17,8 @@ input{font-family:inherit;letter-spacing:inherit}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes fadein{from{opacity:0}to{opacity:1}}
 @keyframes pop{from{opacity:0}to{opacity:1}}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
 .mono{font-family:'Geist Mono',ui-monospace,monospace}
+::placeholder{color:var(--mut-fg);opacity:1}
 #toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);z-index:90;background:var(--fg,#171717);color:var(--bg,#fff);font-size:13px;padding:10px 16px;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.2);animation:pop .16s ease;max-width:80vw}
 /* 键盘可见焦点 — 用现有 --fg token,light/dark 自适应 */
 [data-act]:focus-visible,button:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:2px solid var(--fg);outline-offset:2px;border-radius:6px}
@@ -31,6 +31,15 @@ input{font-family:inherit;letter-spacing:inherit}
   .hdr [data-act="toggleTheme"]{width:44px!important;height:44px!important}
 }
 @media (max-width:480px){.hdr-meta{display:none!important}}
+/* 转录页正文栅格 — 窄屏塌陷为单列(基础样式内联,故 !important) */
+@media (max-width:640px){.grid-2,.grid-3{grid-template-columns:1fr!important}}
+/* 触控设备最小命中区 44×44(coarse 指针才放大,鼠标端保持紧凑密度) */
+@media (pointer:coarse){.tap{min-width:44px!important;min-height:44px!important;height:auto!important}}
+/* 降级动效:装饰性 fadein/pop 与过渡归零;加载 spinner 是功能反馈,豁免保留旋转 */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+  .spin{animation-duration:.7s!important;animation-iteration-count:infinite!important}
+}
 </style>
 </head>
 <body>
@@ -38,7 +47,7 @@ input{font-family:inherit;letter-spacing:inherit}
 <script>
 // ------------------------------------------------------------------ themes
 const THEMES = {
-  light:{'--bg':'#fafafa','--panel':'#ffffff','--muted':'#f2f2f2','--muted2':'#fafafa','--border':'#ebebeb','--fg':'#171717','--mut-fg':'#666666','--accent':'#171717','--accent-fg':'#ffffff','--green':'#297a3a','--red':'#e5484d','--amber':'#b45309','--track':'#ebebeb','--shadow':'0 1px 2px rgba(0,0,0,.05)'},
+  light:{'--bg':'#fafafa','--panel':'#ffffff','--muted':'#f2f2f2','--muted2':'#fafafa','--border':'#ebebeb','--fg':'#171717','--mut-fg':'#5c5c5c','--accent':'#171717','--accent-fg':'#ffffff','--green':'#297a3a','--red':'#e5484d','--amber':'#b45309','--track':'#ebebeb','--shadow':'0 1px 2px rgba(0,0,0,.05)'},
   dark:{'--bg':'#0a0a0a','--panel':'#151515','--muted':'#1f1f1f','--muted2':'#141414','--border':'#2a2a2a','--fg':'#ededed','--mut-fg':'#a1a1a1','--accent':'#ededed','--accent-fg':'#0a0a0a','--green':'#45dec5','--red':'#e5484d','--amber':'#eec32d','--track':'#2a2a2a','--shadow':'0 1px 2px rgba(0,0,0,.4)'},
 };
 function applyTheme(name){const t=THEMES[name]||THEMES.light;const r=document.documentElement.style;Object.keys(t).forEach(k=>r.setProperty(k,t[k]))}
@@ -88,9 +97,9 @@ function measureDuration(file){return new Promise(res=>{const a=document.createE
 function downloadB64(name,b64){const bin=atob(b64);const arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);const url=URL.createObjectURL(new Blob([arr]));const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 
 // ----------------------------------------------------------- style helpers
-const seg=on=>'flex:1;padding:7px 0;text-align:center;font-size:13px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow);border:1px solid var(--border)':'background:transparent;color:var(--mut-fg);border:1px solid transparent');
-const navSeg=on=>'padding:6px 15px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow)':'background:transparent;color:var(--mut-fg)');
-const cbBox=on=>'flex:none;width:19px;height:19px;border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;'+(on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);border:1.5px solid var(--border);color:transparent');
+const seg=on=>'flex:1;padding:7px 0;text-align:center;font-size:13px;font-weight:500;border-radius:6px;cursor:pointer;transition:background .12s,color .12s,box-shadow .12s,border-color .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow);border:1px solid var(--border)':'background:transparent;color:var(--mut-fg);border:1px solid transparent');
+const navSeg=on=>'padding:6px 15px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:background .12s,color .12s,box-shadow .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow)':'background:transparent;color:var(--mut-fg)');
+const cbBox=on=>'flex:none;width:19px;height:19px;border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;'+(on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);border:1.5px solid var(--border);color:transparent');
 const CHECK='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 function toggle(on,act){return `<div data-act="${act}" role="switch" aria-checked="${!!on}" tabindex="0" style="flex:none;width:38px;height:22px;border-radius:999px;cursor:pointer;position:relative;`+(on?'background:var(--accent)':'background:var(--muted);border:1px solid var(--border)')+`"><span style="position:absolute;top:2px;${on?'right:2px':'left:2px'};width:18px;height:18px;border-radius:50%;background:`+(on?'var(--accent-fg)':'var(--panel,#fff);box-shadow:var(--shadow)')+`"></span></div>`;}
 
@@ -127,7 +136,7 @@ function fileRowHTML(f,i){
   const done=S.status==='done';
   const right = done && !f.failed
     ? `<button data-act="download" data-arg="${i}" style="flex:none;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12px;font-weight:500;cursor:pointer">下载 ${esc((f.download||'').split('.').pop().toUpperCase())}</button>`
-    : `<div data-act="removeFile" data-arg="${i}" style="flex:none;width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut-fg);cursor:pointer;font-size:13px">✕</div>`;
+    : `<div data-act="removeFile" data-arg="${i}" role="button" tabindex="0" aria-label="移除文件 ${esc(f.name)}" class="tap" style="flex:none;width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut-fg);cursor:pointer;font-size:13px">✕</div>`;
   const credits = f.uploading? '…' : (f.credits!=null? fmt(f.credits) : '—');
   return `<div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
     <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--mut-fg);border:1px solid var(--border)" class="mono">${esc(f.ext)}</div>
@@ -151,7 +160,7 @@ function langRowsHTML(){
   const q=S.langQuery.trim().toLowerCase();
   const shown=opts.filter(o=>!q||o.name.toLowerCase().includes(q)||o.code.includes(q)).slice(0,60);
   return shown.map(o=>{const on=S.params.language===o.code;
-    return `<div data-act="pickLang" data-code="${esc(o.code)}" data-name="${esc(o.name)}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;font-size:13.5px;cursor:pointer;${on?'background:var(--muted)':''}">${esc(o.name)} ${o.code!=='auto'?'· <span class="mono" style="color:var(--mut-fg);font-size:11px">'+esc(o.code)+'</span>':''}${on?'<span style="color:var(--green)">✓</span>':''}</div>`;}).join('');
+    return `<div data-act="pickLang" data-code="${esc(o.code)}" data-name="${esc(o.name)}" role="option" aria-selected="${on}" tabindex="0" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;font-size:13.5px;cursor:pointer;${on?'background:var(--muted)':''}">${esc(o.name)} ${o.code!=='auto'?'· <span class="mono" style="color:var(--mut-fg);font-size:11px">'+esc(o.code)+'</span>':''}${on?'<span style="color:var(--green)">✓</span>':''}</div>`;}).join('');
 }
 
 function langDropdownHTML(){
@@ -160,18 +169,18 @@ function langDropdownHTML(){
   // 搜索框本身不被销毁,焦点/光标自然保留、零闪烁(不再全量 render + refocus)。
   return `<div style="position:absolute;top:74px;left:0;right:0;z-index:10;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.12);padding:6px;animation:fadein .12s ease;max-height:320px;overflow:auto">
     <input data-input="langQuery" value="${esc(S.langQuery)}" placeholder="搜索 ${(S.data?S.data.languages.length:157)} 种语言…" style="width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:4px;border:none;border-bottom:1px solid var(--border);outline:none;background:transparent;color:var(--fg);font-size:13px"/>
-    <div data-lang-rows>${langRowsHTML()}</div>
+    <div data-lang-rows role="listbox" aria-label="识别语言">${langRowsHTML()}</div>
     <div style="padding:9px 10px 4px;font-size:11px;color:var(--mut-fg);border-top:1px solid var(--border);margin-top:4px">支持 ISO 639-3 代码,或输入 auto 自动检测</div>
   </div>`;
 }
 
 function formatChipsHTML(){
   return (S.data?S.data.formats:['srt']).map(f=>{const on=S.params.format===f;
-    return `<div data-act="pickFormat" data-arg="${f}" class="mono" style="padding:8px 14px;border-radius:6px;font-size:12.5px;font-weight:${on?600:500};cursor:pointer;${on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);color:var(--mut-fg);border:1px solid var(--border)'}">${f.toUpperCase()}</div>`;}).join('');
+    return `<div data-act="pickFormat" data-arg="${f}" role="radio" aria-checked="${on}" tabindex="0" class="mono tap" style="display:inline-flex;align-items:center;justify-content:center;padding:8px 14px;border-radius:6px;font-size:12.5px;font-weight:${on?600:500};cursor:pointer;${on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);color:var(--mut-fg);border:1px solid var(--border)'}">${f.toUpperCase()}</div>`;}).join('');
 }
 
 function keytermsHTML(){
-  const chips=S.params.vocab.map((t,i)=>`<span style="display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:6px;background:var(--muted);border:1px solid var(--border);font-size:12.5px">${esc(t)}<span data-act="removeTerm" data-arg="${i}" style="color:var(--mut-fg);cursor:pointer">✕</span></span>`).join('');
+  const chips=S.params.vocab.map((t,i)=>`<span style="display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:6px;background:var(--muted);border:1px solid var(--border);font-size:12.5px">${esc(t)}<span data-act="removeTerm" data-arg="${i}" role="button" tabindex="0" aria-label="移除词汇 ${esc(t)}" style="color:var(--mut-fg);cursor:pointer">✕</span></span>`).join('');
   return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);min-height:42px">
     ${chips}
     <input data-input="keyterm" data-enter="addTerm" value="${esc(S.keyterm)}" placeholder="输入后回车添加…" style="flex:1;min-width:120px;border:none;outline:none;background:transparent;color:var(--fg);font-size:13px"/>
@@ -227,14 +236,14 @@ function acctPanelHTML(){
       <span class="mono" style="flex:none;font-size:12px;color:var(--mut-fg)">剩余 ${a.rem!=null?fmt(a.rem):'—'}</span>
     </div>`;}).join('');
   return `<div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
-    <div data-act="toggleAcctPanel" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;background:var(--muted2)">
+    <div data-act="toggleAcctPanel" role="button" tabindex="0" aria-expanded="${S.acctPanelOpen}" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;background:var(--muted2)">
       <span style="font-size:13px;font-weight:500">高级 · 手动指定账号 <span style="font-size:11px;color:var(--mut-fg);font-weight:400">· 限定分配候选集</span></span>
       <span style="display:flex;align-items:center;gap:9px"><span style="font-size:11px;color:${nSel?'var(--amber)':'var(--mut-fg)'};border:1px solid var(--border);border-radius:5px;padding:2px 8px">${nSel?`已选 ${nSel} 个账号`:'自动分配'}</span><span style="color:var(--mut-fg);font-size:13px">${S.acctPanelOpen?'▴':'▾'}</span></span>
     </div>
     ${S.acctPanelOpen?`<div style="border-top:1px solid var(--border);padding:8px;display:flex;flex-direction:column;gap:2px">
       <div style="padding:4px 12px 8px;font-size:11.5px;color:var(--mut-fg)">手动模式下额度不足会直接报错，不会自动注册新账号；清空勾选即回到自动分配。</div>
       ${rows||'<div style="padding:8px 12px;font-size:12.5px;color:var(--mut-fg)">暂无可用账号</div>'}
-      ${nSel?`<div data-act="clearAllowed" style="padding:8px 12px;font-size:12px;color:var(--mut-fg);cursor:pointer;text-decoration:underline;text-underline-offset:3px">清空选择（回到自动分配）</div>`:''}
+      ${nSel?`<div data-act="clearAllowed" role="button" tabindex="0" style="padding:8px 12px;font-size:12px;color:var(--mut-fg);cursor:pointer;text-decoration:underline;text-underline-offset:3px">清空选择（回到自动分配）</div>`:''}
     </div>`:''}
   </div>`;
 }
@@ -250,7 +259,7 @@ function transcribeView(){
     <div style="display:flex;flex-direction:column;gap:11px">
       <div style="display:flex;align-items:center;justify-content:space-between">
         <span style="font-size:13px;font-weight:500">已选择 ${S.files.length} 个文件 · 共 ${humanSize(totalSize)}</span>
-        <span data-act="clearFiles" style="font-size:12px;color:var(--mut-fg);cursor:pointer">清空</span>
+        <span data-act="clearFiles" role="button" tabindex="0" style="font-size:12px;color:var(--mut-fg);cursor:pointer">清空</span>
       </div>
       ${S.files.map((f,i)=>fileRowHTML(f,i)).join('')}
     </div>` : '';
@@ -260,33 +269,33 @@ function transcribeView(){
     <div style="display:flex;flex-direction:column;gap:16px">
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
         <div><h2 style="margin:0;font-size:16px;font-weight:600">转录参数</h2><p style="margin:6px 0 0;font-size:13px;color:var(--mut-fg)">设置识别语言、导出格式与识别选项</p></div>
-        <div style="display:flex;gap:3px;padding:3px;background:var(--muted);border-radius:6px;width:248px">
-          <div data-act="setBatch" style="${seg(S.mode==='batch')}">批量统一</div>
-          <div data-act="setPerfile" style="${seg(S.mode==='perfile')}">逐个设置</div>
+        <div role="radiogroup" aria-label="参数应用范围" style="display:flex;gap:3px;padding:3px;background:var(--muted);border-radius:6px;width:248px">
+          <div data-act="setBatch" role="radio" aria-checked="${S.mode==='batch'}" tabindex="0" style="${seg(S.mode==='batch')}">批量统一</div>
+          <div data-act="setPerfile" role="radio" aria-checked="${S.mode==='perfile'}" tabindex="0" style="${seg(S.mode==='perfile')}">逐个设置</div>
         </div>
       </div>
       ${S.mode==='perfile'?'<div style="font-size:12px;color:var(--amber);padding:2px">逐个设置暂未启用,当前参数应用到全部文件。</div>':''}
       <div style="border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff);overflow:hidden">
         <div style="padding:13px 22px;border-bottom:1px solid var(--border);background:var(--muted2);font-size:12.5px;color:var(--mut-fg)">统一参数 · 应用到全部 <b style="color:var(--fg)">${S.files.length}</b> 个文件</div>
         <div style="padding:22px;display:flex;flex-direction:column;gap:22px">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:22px">
+          <div class="grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:22px">
             <div style="position:relative;display:flex;flex-direction:column;gap:8px">
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500">识别语言<span class="mono" style="font-size:10.5px;color:var(--mut-fg);font-weight:400">language_code</span></label>
-              <button data-act="toggleLang" style="display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;cursor:pointer">
+              <button data-act="toggleLang" aria-haspopup="listbox" aria-expanded="${S.langOpen}" style="display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;cursor:pointer">
                 <span style="display:flex;align-items:center;gap:8px"><span class="mono" style="font-size:11px;color:var(--mut-fg)">${langLabel}</span>${esc(S.params.languageName)}</span><span style="color:var(--mut-fg)">▾</span>
               </button>
               ${langDropdownHTML()}
             </div>
             <div style="display:flex;flex-direction:column;gap:8px">
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500">导出格式<span class="mono" style="font-size:10.5px;color:var(--mut-fg);font-weight:400">export_format</span></label>
-              <div style="display:flex;gap:7px;flex-wrap:wrap">${formatChipsHTML()}</div>
+              <div role="radiogroup" aria-label="导出格式" style="display:flex;gap:7px;flex-wrap:wrap">${formatChipsHTML()}</div>
             </div>
           </div>
           <div style="display:flex;flex-direction:column;gap:8px">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500">自定义词汇<span class="mono" style="font-size:10.5px;color:var(--mut-fg);font-weight:400">keyterms</span><span style="color:var(--mut-fg);font-weight:400;font-size:12.5px">· 提升专有名词识别准确度</span></label>
             ${keytermsHTML()}
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div class="grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             ${toggleRow('音频事件标记','tag_audio_events','标记 [笑声] [掌声] 等非语音事件','tag_audio_events')}
             ${toggleRow('包含字幕','include_subtitles','生成带时间轴的字幕分段','include_subtitles')}
             ${toggleRow('非逐字模式','no_verbatim','顺滑口语,去除重复与口头语','no_verbatim')}
@@ -301,7 +310,7 @@ function transcribeView(){
     <div style="display:flex;flex-direction:column;gap:16px">
       <div><h2 style="margin:0;font-size:16px;font-weight:600">使用的账号</h2><p style="margin:6px 0 0;font-size:13px;color:var(--mut-fg)">按剩余额度自动分配,先排空快用完的账号</p></div>
       ${acctPanelHTML()}
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <div class="grid-3" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
         <div style="padding:15px 17px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
           <div style="font-size:12px;color:var(--mut-fg)">预计总消耗</div>
           <div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${fmt(totalNeed)}</div>
@@ -338,7 +347,7 @@ function transcribeView(){
 
 function actionBarHTML(totalNeed,allocCount){
   const tp=S.transProgress;
-  const detailBtn=`<span data-act="toggleTransLog" style="flex:none;cursor:pointer;text-decoration:underline;text-underline-offset:3px">详情 ${S.transLogOpen?'▴':'▾'}</span>`;
+  const detailBtn=`<span data-act="toggleTransLog" role="button" tabindex="0" aria-expanded="${S.transLogOpen}" style="flex:none;cursor:pointer;text-decoration:underline;text-underline-offset:3px">详情 ${S.transLogOpen?'▴':'▾'}</span>`;
   // 完整日志面板：转录期间实时追加,失败后保留（S.transProgress 不清空）
   const logPanel=(tp&&S.transLogOpen)?`<div style="max-width:1024px;margin:0 auto;padding:10px 24px 0"><div data-translog style="height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--muted2);padding:10px 12px;font-size:12px;line-height:1.7" class="mono">
       ${(tp.lines&&tp.lines.length)?tp.lines.map(l=>`<div>${esc(l)}</div>`).join(''):'<div style="color:var(--mut-fg)">等待日志…</div>'}
@@ -352,7 +361,7 @@ function actionBarHTML(totalNeed,allocCount){
       ${acts.map(a=>`<div class="mono" style="font-size:12px;color:var(--mut-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:8px;vertical-align:1px"></span>${esc(a.file)} — ${esc(a.stage)}</div>`).join('')}</div>`;
     const last=(tp&&tp.lines&&tp.lines.length)?tp.lines[tp.lines.length-1]:'';
     inner=`<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg);min-width:0">
-        <span style="flex:none;width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>
+        <span class="spin" style="flex:none;width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>
         <span class="mono" style="flex:none;color:var(--fg)">已完成 ${tp?tp.done||0:0}/${tp?tp.total||0:0}</span>
         ${cur?`<span style="flex:none;opacity:.5">·</span><span style="flex:none;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(cur)}</span>`:''}
         ${last?`<span style="flex:none;opacity:.5">·</span><span class="mono" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(last)}</span>`:''}
@@ -365,7 +374,7 @@ function actionBarHTML(totalNeed,allocCount){
       <button data-act="start" style="flex:none;display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer">重试转录</button>`;
   } else if(S.status==='done'){
     const ok=S.results.filter(r=>r.ok).length;
-    inner=`<div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--fg)"><span style="width:20px;height:20px;border-radius:50%;background:var(--green);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px">✓</span>转录完成 · 已自动下载 ${ok} 个字幕文件</div>
+    inner=`<div style="display:flex;align-items:center;gap:9px;font-size:13px;color:var(--fg)"><span style="width:20px;height:20px;border-radius:50%;background:var(--green);color:var(--accent-fg);display:flex;align-items:center;justify-content:center;font-size:12px">✓</span>转录完成 · 已自动下载 ${ok} 个字幕文件</div>
       <div style="display:flex;align-items:center;gap:9px">
         <button data-act="reset" style="padding:10px 16px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13px;font-weight:500;cursor:pointer">重新开始</button>
         <button data-act="downloadAll" style="display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:14px;font-weight:600;cursor:pointer">全部下载</button>
@@ -504,7 +513,7 @@ function accountsView(){
 function statCard(label,val){return `<div style="padding:14px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)"><div style="font-size:12px;color:var(--mut-fg)">${label}</div><div style="margin-top:5px;font-size:20px;font-weight:600" class="mono">${val}</div></div>`;}
 
 // ------------------------------------------------------------------ modals
-const SPINNER='<span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>';
+const SPINNER='<span class="spin" style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>';
 function modalsHTML(){
   let h='';
   if(S.loginOpen){
@@ -690,7 +699,7 @@ function toolBarHTML(){
   const st=S.tool.status, n=S.tool.files.length, segs=toolTotalSegs(), chunk=toolChunkVal();
   if(st==='running'){
     return `<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mut-fg)">
-        <span style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>${esc(S.tool.phase||'处理中…')}</div>
+        <span class="spin" style="width:15px;height:15px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>${esc(S.tool.phase||'处理中…')}</div>
       <button style="padding:10px 20px;border-radius:6px;border:none;background:var(--muted);color:var(--mut-fg);font-size:14px;font-weight:600;cursor:default">执行中…</button>`;
   }
   if(st==='done'){
