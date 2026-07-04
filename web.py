@@ -27,6 +27,7 @@ import stt
 
 HERE = pathlib.Path(__file__).resolve().parent
 HTML = HERE / "webui.html"
+FAVICON = HERE / "favicon.webp"
 CONFIG_PATH = stt.CONFIG_PATH
 _LOCK = threading.Lock()          # serialise accounts.json read/modify/write
 _UPLOAD_DIR = pathlib.Path(tempfile.mkdtemp(prefix="elevenlabs-stt-web-"))
@@ -725,6 +726,14 @@ class Handler(BaseHTTPRequestHandler):
             body = HTML.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/favicon.webp":
+            body = FAVICON.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/webp")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

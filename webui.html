@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scribe · 音频转录字幕</title>
+<link rel="icon" type="image/webp" href="/favicon.webp">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -119,7 +120,7 @@ function headerHTML(){
   const pool=S.data?S.data.pool:{fresh:0,total:0};
   return `<header class="hdr" style="position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:56px;background:var(--bg);border-bottom:1px solid var(--border)">
     <div class="hdr-brand" style="display:flex;align-items:center;gap:11px">
-      <svg width="19" height="17" viewBox="0 0 24 22" fill="none"><path d="M12 1 L23 21 L1 21 Z" fill="var(--fg)"></path></svg>
+      <img src="/favicon.webp" width="24" height="24" alt="" style="display:block;flex:none;width:24px;height:24px;border-radius:6px;object-fit:cover">
       <span style="font-size:14px;font-weight:600;letter-spacing:-0.03em">Scribe · 音频转录字幕</span>
       <span class="hdr-meta" style="font-size:12px;color:var(--mut-fg);border-left:1px solid var(--border);padding-left:11px">ElevenLabs</span>
     </div>
