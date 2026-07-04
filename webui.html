@@ -20,6 +20,17 @@ input{font-family:inherit;letter-spacing:inherit}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
 .mono{font-family:'Geist Mono',ui-monospace,monospace}
 #toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);z-index:90;background:var(--fg,#171717);color:var(--bg,#fff);font-size:13px;padding:10px 16px;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.2);animation:pop .16s ease;max-width:80vw}
+/* 键盘可见焦点 — 用现有 --fg token,light/dark 自适应 */
+[data-act]:focus-visible,button:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:2px solid var(--fg);outline-offset:2px;border-radius:6px}
+/* 窄屏 header — 基础样式为内联,优先级高于样式表,故覆盖处需 !important */
+/* ponytail: !important 因 header 基础样式内联;若 header 继续膨胀再整体迁移到 class 基础样式 */
+@media (max-width:640px){
+  .hdr{flex-wrap:wrap!important;height:auto!important;padding:10px 16px!important;gap:10px!important}
+  .hdr-actions{flex-wrap:wrap;gap:9px!important;justify-content:flex-start}
+  .hdr-nav button{min-height:44px;padding:8px 14px!important}
+  .hdr [data-act="toggleTheme"]{width:44px!important;height:44px!important}
+}
+@media (max-width:480px){.hdr-meta{display:none!important}}
 </style>
 </head>
 <body>
@@ -46,6 +57,8 @@ const S = {
   acctPanelOpen:false, allowedEmails:[],
   // /api/transcribe/progress payload + 底栏「详情」日志面板开关
   transProgress:null, transLogOpen:false,
+  // 应用内确认弹层 {title,lines,okLabel,resolve} | null,替代原生 confirm()
+  confirmBox:null,
   // accounts view
   query:'', sortKey:'created', sortDir:'desc', sortOpen:false,
   selected:[], revealed:[],
@@ -79,19 +92,19 @@ const seg=on=>'flex:1;padding:7px 0;text-align:center;font-size:13px;font-weight
 const navSeg=on=>'padding:6px 15px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .12s;'+(on?'background:var(--panel,#fff);color:var(--fg);box-shadow:var(--shadow)':'background:transparent;color:var(--mut-fg)');
 const cbBox=on=>'flex:none;width:19px;height:19px;border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;'+(on?'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent)':'background:var(--panel,#fff);border:1.5px solid var(--border);color:transparent');
 const CHECK='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-function toggle(on,act){return `<div data-act="${act}" style="flex:none;width:38px;height:22px;border-radius:999px;cursor:pointer;position:relative;`+(on?'background:var(--accent)':'background:var(--muted);border:1px solid var(--border)')+`"><span style="position:absolute;top:2px;${on?'right:2px':'left:2px'};width:18px;height:18px;border-radius:50%;background:`+(on?'var(--accent-fg)':'var(--panel,#fff);box-shadow:var(--shadow)')+`"></span></div>`;}
+function toggle(on,act){return `<div data-act="${act}" role="switch" aria-checked="${!!on}" tabindex="0" style="flex:none;width:38px;height:22px;border-radius:999px;cursor:pointer;position:relative;`+(on?'background:var(--accent)':'background:var(--muted);border:1px solid var(--border)')+`"><span style="position:absolute;top:2px;${on?'right:2px':'left:2px'};width:18px;height:18px;border-radius:50%;background:`+(on?'var(--accent-fg)':'var(--panel,#fff);box-shadow:var(--shadow)')+`"></span></div>`;}
 
 // ------------------------------------------------------------------ header
 function headerHTML(){
   const pool=S.data?S.data.pool:{fresh:0,total:0};
-  return `<header style="position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:56px;background:var(--bg);border-bottom:1px solid var(--border)">
-    <div style="display:flex;align-items:center;gap:11px">
+  return `<header class="hdr" style="position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:56px;background:var(--bg);border-bottom:1px solid var(--border)">
+    <div class="hdr-brand" style="display:flex;align-items:center;gap:11px">
       <svg width="19" height="17" viewBox="0 0 24 22" fill="none"><path d="M12 1 L23 21 L1 21 Z" fill="var(--fg)"></path></svg>
       <span style="font-size:14px;font-weight:600;letter-spacing:-0.03em">Scribe · 音频转录字幕</span>
-      <span style="font-size:12px;color:var(--mut-fg);border-left:1px solid var(--border);padding-left:11px">ElevenLabs</span>
+      <span class="hdr-meta" style="font-size:12px;color:var(--mut-fg);border-left:1px solid var(--border);padding-left:11px">ElevenLabs</span>
     </div>
-    <div style="display:flex;align-items:center;gap:12px">
-      <nav style="display:flex;align-items:center;gap:2px;padding:3px;background:var(--muted);border-radius:6px">
+    <div class="hdr-actions" style="display:flex;align-items:center;gap:12px">
+      <nav class="hdr-nav" style="display:flex;align-items:center;gap:2px;padding:3px;background:var(--muted);border-radius:6px">
         <button data-act="goTranscribe" style="${navSeg(S.view==='transcribe')}">转录</button>
         <button data-act="goAccounts" style="${navSeg(S.view==='accounts')}">账号管理</button>
         <button data-act="goTools" style="${navSeg(S.view==='tools')}">功能管理</button>
@@ -207,7 +220,7 @@ function acctPanelHTML(){
     const on=S.allowedEmails.includes(a.email);
     const low=minNeed!=null&&a.rem!=null&&a.rem<minNeed;   // 弱判据,plan.error 兜底
     const dis=low&&!on;                                    // 已勾选的仍可取消
-    return `<div ${dis?'':`data-act="toggleAllowed" data-arg="${esc(a.email)}"`} style="display:flex;align-items:center;gap:11px;padding:8px 12px;border-radius:6px;${dis?'opacity:.45;cursor:not-allowed':'cursor:pointer'}">
+    return `<div ${dis?'':`data-act="toggleAllowed" data-arg="${esc(a.email)}" role="checkbox" aria-checked="${on}" tabindex="0"`} style="display:flex;align-items:center;gap:11px;padding:8px 12px;border-radius:6px;${dis?'opacity:.45;cursor:not-allowed':'cursor:pointer'}">
       <div style="${cbBox(on)}">${CHECK}</div>
       <span class="mono" style="flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.email)}</span>
       ${low?'<span style="flex:none;font-size:11px;color:var(--red)">额度不足</span>':''}
@@ -311,7 +324,7 @@ function transcribeView(){
   return `<main style="max-width:1024px;margin:0 auto;padding:34px 24px 132px;display:flex;flex-direction:column;gap:26px">
     <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">上传音频,生成字幕</h1>
       <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">支持单个或批量上传 · 按额度自动分配账号 · 完成后自动下载字幕文件</p></div>
-    <label data-drop="pickFiles" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
+    <label data-drop="pickFiles" tabindex="0" role="button" aria-label="选择或拖拽音频文件" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
       <input type="file" multiple accept="audio/*" data-input="pickFiles" style="display:none"/>
       <div style="width:46px;height:46px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;border:1px solid var(--border);color:var(--fg)"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></div>
       <div><div style="font-size:15px;font-weight:600">拖拽音频文件到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
@@ -593,6 +606,19 @@ function modalsHTML(){
       <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)"><button data-act="closeImport" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">完成</button></div>
     </div></div>`;
   }
+  if(S.confirmBox){   // 应用内额度确认,替代原生 confirm();背景点/取消=cancel,Esc 见 keydown
+    const c=S.confirmBox;
+    h+=`<div data-act="confirmCancel" style="position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:24px;animation:fadein .12s ease"><div data-act="stop" style="width:100%;max-width:420px;background:var(--panel,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 24px 64px rgba(0,0,0,.28);overflow:hidden;animation:pop .16s ease">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600">${esc(c.title||'确认开始转录')}</div>
+      <div style="padding:20px 22px;display:flex;flex-direction:column;gap:10px">
+        ${c.lines.map(l=>`<div style="display:flex;gap:9px;font-size:13.5px;color:var(--fg);line-height:1.5"><span style="flex:none;color:var(--mut-fg)">·</span><span>${esc(l)}</span></div>`).join('')}
+      </div>
+      <div style="padding:16px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:9px;background:var(--muted2)">
+        <button data-act="confirmCancel" style="padding:9px 18px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:13.5px;font-weight:500;cursor:pointer">取消</button>
+        <button data-act="confirmOk" style="padding:9px 18px;border-radius:6px;border:none;background:var(--accent);color:var(--accent-fg);font-size:13.5px;font-weight:600;cursor:pointer">${esc(c.okLabel||'确认')}</button>
+      </div>
+    </div></div>`;
+  }
   return h;
 }
 
@@ -802,7 +828,24 @@ function render(){
   updateTopBtn();
   const lg=document.querySelector('[data-reglog]'); if(lg)lg.scrollTop=lg.scrollHeight; // 注册日志区滚动到底
   const tl=document.querySelector('[data-translog]'); if(tl)tl.scrollTop=tl.scrollHeight; // 转录日志区滚动到底
+  a11yPass();
 }
+
+// 渲染后归一化:非语义交互元素(data-act 的 div/span)补 tabindex+role,使键盘可聚焦、读屏可识别。
+// 键盘激活见下方 keydown 委托;开关类元素在各自 helper 里已带 role=switch/checkbox + aria-checked。
+function a11yPass(){
+  document.querySelectorAll('#app [data-act]').forEach(el=>{
+    if(/^(BUTTON|A|INPUT|LABEL|TEXTAREA)$/.test(el.tagName))return;
+    if(!el.hasAttribute('tabindex'))el.tabIndex=0;
+    if(!el.hasAttribute('role'))el.setAttribute('role','button');
+  });
+}
+
+// 应用内确认:返回 Promise<boolean>,替代原生 confirm()。resolve 由 confirmOk/confirmCancel 委托触发。
+function uiConfirm(opts){
+  return new Promise(res=>{ S.confirmBox={title:opts.title,lines:opts.lines||[],okLabel:opts.okLabel,resolve:res}; render(); });
+}
+function closeConfirm(ok){ const r=S.confirmBox&&S.confirmBox.resolve; S.confirmBox=null; render(); if(r)r(ok); }
 
 // back-to-top: a single persistent button outside #app, shown on the accounts page
 // after scrolling. Kept off the render() innerHTML so scroll never re-renders the app.
@@ -898,26 +941,27 @@ async function startTranscribe(){
   const uploads=S.files.filter(f=>f.id&&!f.uploading).map(f=>f.id);
   if(!uploads.length){ toast('没有已就绪的文件'); return; }
   if(S.plan&&S.plan.error){ toast(S.plan.error); return; } // 手动候选集装不下等预览错误
-  // 执行前确认:切分方案 + 注册缺口合并为一个弹窗,取消则零副作用
+  // 执行前确认:普通路径也确认(花的是不可退的免费额度),切分/注册并入同一应用内弹层
   const splits=((S.plan&&S.plan.files)||[]).filter(x=>x.segCount);
   const reg=(S.plan&&S.plan.registerCount)||0;
-  let confirmed=false;
-  if(splits.length||reg){
-    const parts=[];
-    if(splits.length)parts.push(`${splits.length} 个文件将切分为 ${splits.reduce((a,x)=>a+x.segCount,0)} 段`);
-    if(reg)parts.push(`需注册 ${reg} 个新账号`);
-    if(!confirm(parts.join('，')+'，是否继续？'))return;
-    confirmed=true;
-  }
+  const totalNeed=(S.plan&&S.plan.totalNeed)||0;
+  const allocCount=((S.plan&&S.plan.alloc)||[]).length;
+  const lines=[`预计消耗 ${fmt(totalNeed)} credits · 覆盖 ${allocCount} 个账号`];
+  if(splits.length)lines.push(`${splits.length} 个文件将切分为 ${splits.reduce((a,x)=>a+x.segCount,0)} 段`);
+  if(reg)lines.push(`需注册 ${reg} 个新账号`);
+  lines.push('免费额度消耗后不可退,请确认无误');
+  if(!await uiConfirm({lines,okLabel:'开始转录'}))return;
+  const confirmedRegister=reg>0;   // 首轮弹层已含注册确认
   S.status='running'; S.transProgress=null; render();
   const timer=setInterval(pollTransProgress,1000);   // 真实进度轮询(同 runRegister 模式)
   const send=flag=>api('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({uploads,params:S.params,confirmRegister:flag,allowedEmails:S.allowedEmails})});
   let res;
   try{
-    res=await send(confirmed);
+    res=await send(confirmedRegister);
     if(res.needRegister){   // 预览与实际余额有偏差时的后端兜底
-      if(confirm(`需注册 ${res.needRegister} 个新账号，是否继续？`)) res=await send(true);
+      if(confirmedRegister){ res=await send(true); }   // 用户已在弹层同意注册 → 静默续跑,不二次打断(消除双弹)
+      else if(await uiConfirm({lines:[`需注册 ${res.needRegister} 个新账号后继续`],okLabel:'继续'})){ res=await send(true); }
       else { clearInterval(timer); S.status='idle'; S.transProgress=null; render(); return; }
     }
   }catch(e){ clearInterval(timer); S.status='idle'; render(); toast('转录请求失败'); return; }
@@ -969,6 +1013,7 @@ document.addEventListener('click',e=>{
     toggleAllowed(){S.allowedEmails=S.allowedEmails.includes(arg)?S.allowedEmails.filter(x=>x!==arg):[...S.allowedEmails,arg];render();refreshPlan();},
     clearAllowed(){S.allowedEmails=[];render();refreshPlan();},
     toggleTransLog(){S.transLogOpen=!S.transLogOpen;render();},
+    confirmOk(){closeConfirm(true);}, confirmCancel(){closeConfirm(false);},
     download(){const f=S.files[+arg];if(f&&f._content)downloadB64(f.download,f._content);},
     downloadAll(){S.results.filter(r=>r.ok&&r.content).forEach(r=>downloadB64(r.download,r.content));},
     // accounts
@@ -1047,6 +1092,18 @@ document.addEventListener('keydown',e=>{
   const el=e.target.closest('[data-enter]'); if(!el||e.key!=='Enter')return;
   if(el.dataset.enter==='addTerm'){const v=S.keyterm.trim();if(v&&!S.params.vocab.includes(v))S.params.vocab.push(v);S.keyterm='';render();const n=document.querySelector('[data-input="keyterm"]');if(n)n.focus();} // render 后把焦点还给 keyterm 输入框,可直接继续输入下一个词
   else if(el.dataset.enter==='submitLogin'){if(S.busy!=='login')runLogin();}
+});
+
+// 键盘可用性:Esc 取消确认弹层;Enter/Space 激活聚焦的非原生 [data-act] 元素(复用 click 委托)
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&S.confirmBox){e.preventDefault();closeConfirm(false);return;}
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  // 拖拽上传区是 <label>+隐藏 file input,键盘激活时触发内部 input 打开选择器
+  const drop=e.target.closest&&e.target.closest('[data-drop]');
+  if(drop){const inp=drop.querySelector('input[type=file]');if(inp){e.preventDefault();inp.click();}return;}
+  const el=e.target.closest&&e.target.closest('[data-act]');
+  if(!el||/^(BUTTON|A|INPUT|TEXTAREA)$/.test(el.tagName))return;
+  e.preventDefault(); el.click();
 });
 
 async function reloadState(){S.data=await api('/api/state');render();}
