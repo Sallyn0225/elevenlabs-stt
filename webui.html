@@ -39,7 +39,7 @@ const S = {
   files:[],                  // {id,name,size,duration,credits,ext,uploading}
   params:{language:'auto',languageName:'自动检测',format:'srt',vocab:['ElevenLabs'],
           tag_audio_events:true,include_subtitles:true,no_verbatim:false,
-          use_speaker_library:false,show_cost:false},
+          use_speaker_library:false,show_cost:false,skip_silence:false},
   keyterm:'', langOpen:false, langQuery:'', mode:'batch',
   plan:null, status:'idle', results:[],
   // 高级 · 手动指定账号：allowedEmails 空数组 = 自动分配（默认）
@@ -55,7 +55,8 @@ const S = {
   _pageEmails:[], _page:1, _totalPages:1,        // filled by accountsView() for handlers
   // 功能管理 · 长音频切分：files 复用 upload 流,plans 存后端真实切分方案(id→{segments,hard,error})
   tool:{files:[],plans:{},expanded:[],results:[],outPath:'out',chunkSecs:'',
-        silenceDb:'-30',silenceMin:'0.5',advOpen:false,status:'idle',phase:''},
+        silenceDb:'-30',silenceMin:'0.5',skipSilence:false,skipMin:'',
+        advOpen:false,status:'idle',phase:''},
 };
 
 // --------------------------------------------------------------- utilities
@@ -120,7 +121,7 @@ function fileRowHTML(f,i){
     <div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:8px;min-width:0">
         <span style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</span>
-        ${(si=>si&&si.segCount?`<span style="flex:none;font-size:11px;color:var(--amber);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">将切分为 ${si.segCount} 段</span>`
+        ${(si=>si&&si.segCount?`<span style="flex:none;font-size:11px;color:var(--amber);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">将切分为 ${si.segCount} 段${si.skipped>0?` · 省 ${clock(si.skipped)} 静音`:''}</span>`
           :si&&si.splitError?`<span title="${esc(si.splitError)}" style="flex:none;font-size:11px;color:var(--red)">切分失败</span>`:'')(splitInfo(f.name))}
       </div>
       <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${esc(humanSize(f.size))} · ${esc(dur2str(f.duration))}</div>
@@ -277,7 +278,8 @@ function transcribeView(){
             ${toggleRow('包含字幕','include_subtitles','生成带时间轴的字幕分段','include_subtitles')}
             ${toggleRow('非逐字模式','no_verbatim','顺滑口语,去除重复与口头语','no_verbatim')}
             ${toggleRow('使用说话人库','use_speaker_library','匹配已保存的说话人声纹,标注说话人','use_speaker_library')}
-            ${toggleRow('显示预估费用','show_cost','转录前先返回额度消耗预估','show_cost',true)}
+            ${toggleRow('显示预估费用','show_cost','转录前先返回额度消耗预估','show_cost')}
+            ${toggleRow('跳过长静音','skip_silence','切分时跳过 ≥10s 的静音,不上传不计费;段数可能变多','skip_silence')}
           </div>
         </div>
       </div>
@@ -641,6 +643,7 @@ function toolFileRowHTML(f){
   const hardCount=(p&&!p.error)?(p.hard||[]).filter(Boolean).length:0;
   const segStr=f.uploading?'…':(p&&p.error?'!':(seg==null?'…':seg));
   const hardBadge=hardCount?`<div style="flex:none;font-size:11px;color:var(--amber);border:1px solid var(--border);border-radius:5px;padding:4px 8px" title="窗口内无静音,按时长硬切">${hardCount} 硬切</div>`:'';
+  const skipBadge=(p&&!p.error&&p.skipped>0)?`<div style="flex:none;font-size:11px;color:var(--green);border:1px solid var(--border);border-radius:5px;padding:4px 8px" title="被跳过的长静音总时长,不保存进片段">省 ${clock(p.skipped)} 静音</div>`:'';
   return `<div style="border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff);overflow:hidden">
     <div style="display:flex;align-items:center;gap:14px;padding:13px 16px">
       <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--mut-fg);border:1px solid var(--border)" class="mono">${esc(f.ext)}</div>
@@ -649,7 +652,7 @@ function toolFileRowHTML(f){
         <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${esc(humanSize(f.size))} · ${esc(clock(f.duration))} · ${f.duration!=null?f.duration.toFixed(1)+'s':'—'}</div>
       </div>
       <div style="flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg);background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px" class="mono">→ ${segStr} 段</div>
-      ${hardBadge}
+      ${hardBadge}${skipBadge}
       ${p&&!p.error?`<div data-act="toolToggle" data-arg="${esc(f.id)}" style="flex:none;display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--mut-fg);font-size:12px;cursor:pointer">${expanded?'收起方案':'查看方案'}<span>${expanded?'▴':'▾'}</span></div>`:''}
       <div data-act="toolRemove" data-arg="${esc(f.id)}" style="flex:none;width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut-fg);cursor:pointer;font-size:13px">✕</div>
     </div>
@@ -740,6 +743,10 @@ function toolsView(){
           </div>
           <div style="font-size:11.5px;color:var(--mut-fg)">每个文件的片段将写入独立子目录 <span style="color:var(--fg)" class="mono">${esc(outEx)}</span></div>
         </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border:1px solid var(--border);border-radius:6px">
+          <div><div style="display:flex;align-items:center;gap:8px"><span style="font-size:13.5px;font-weight:500">跳过长静音</span><span style="font-size:10.5px;color:var(--mut-fg)" class="mono">skip_silence</span></div><div style="margin-top:2px;font-size:12px;color:var(--mut-fg)">切分时跳过超过阈值的静音区间,不保存进片段;段数可能变多</div></div>
+          ${toggle(S.tool.skipSilence,'tgToolSkip')}
+        </div>
         <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
           <div data-act="toggleAdv" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;background:var(--muted2)">
             <span style="font-size:13px;font-weight:500">高级参数 <span style="font-size:11px;color:var(--mut-fg);font-weight:400">· 静音检测与分段阈值</span></span>
@@ -768,6 +775,13 @@ function toolsView(){
                 <input data-input="tool.silenceMin" value="${esc(S.tool.silenceMin)}" style="flex:1;border:none;outline:none;background:transparent;color:var(--fg);font-size:13px" class="mono"/><span style="font-size:12px;color:var(--mut-fg)" class="mono">s</span>
               </div>
               <div style="font-size:10.5px;color:var(--mut-fg)">短于此的静音忽略 · 默认 0.5</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:7px">
+              <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500">跳过静音最短时长<span style="font-size:10px;color:var(--mut-fg);font-weight:400" class="mono">skip_min</span></label>
+              <div style="display:flex;align-items:center;gap:8px;height:38px;padding:0 12px;border:1px solid var(--border);border-radius:6px;${S.tool.skipSilence?'':'opacity:.5'}">
+                <input data-input="tool.skipMin" value="${esc(S.tool.skipMin)}" placeholder="10" style="flex:1;border:none;outline:none;background:transparent;color:var(--fg);font-size:13px" class="mono"/><span style="font-size:12px;color:var(--mut-fg)" class="mono">s</span>
+              </div>
+              <div style="font-size:10.5px;color:var(--mut-fg)">≥ 此时长的静音才被跳过 · 默认 10 · 需打开「跳过长静音」</div>
             </div>
           </div>`:''}
         </div>
@@ -811,7 +825,7 @@ async function refreshPlan(){
   if(!ready.length){ S.plan=null; return; }
   S.plan=await api('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({files:ready.map(f=>({id:f.id,name:f.name,duration:f.duration})),
-      allowedEmails:S.allowedEmails})});
+      allowedEmails:S.allowedEmails,skipSilence:S.params.skip_silence})});
   render();
 }
 
@@ -845,7 +859,8 @@ async function refreshToolPlans(){
   const seq=++_toolPlanSeq;
   const res=await api('/api/split/plan',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({uploads:ready.map(f=>f.id),chunk_secs:toolChunkVal(),
-      silence_db:S.tool.silenceDb,silence_min:S.tool.silenceMin})});
+      silence_db:S.tool.silenceDb,silence_min:S.tool.silenceMin,
+      skip_silence:S.tool.skipSilence,skip_min:S.tool.skipMin})});
   if(seq!==_toolPlanSeq) return;   // 期间又发起了新 plan,丢弃过期响应防乱序覆盖
   const plans={}; (res.files||[]).forEach(p=>{plans[p.id]=p;});
   S.tool.plans=plans; render();
@@ -863,7 +878,8 @@ async function runSplitExec(){
   try{
     const res=await api('/api/split/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({uploads:ready.map(f=>f.id),output_dir:S.tool.outPath||'out',
-        chunk_secs:toolChunkVal(),silence_db:S.tool.silenceDb,silence_min:S.tool.silenceMin})});
+        chunk_secs:toolChunkVal(),silence_db:S.tool.silenceDb,silence_min:S.tool.silenceMin,
+        skip_silence:S.tool.skipSilence,skip_min:S.tool.skipMin})});
     clearInterval(timer);
     if(res.error){ S.tool.status='idle'; render(); toast(res.error); return; }
     S.tool.results=res.results||[]; S.tool.status='done'; render();
@@ -934,6 +950,7 @@ document.addEventListener('click',e=>{
     toolRemove(){S.tool.files=S.tool.files.filter(f=>String(f.id==null?'':f.id)!==arg);delete S.tool.plans[arg];S.tool.expanded=S.tool.expanded.filter(x=>x!==arg);S.tool.status='idle';render();refreshToolPlans();}, // id==null → 上传失败行,data-arg 为空串也能移除
     clearToolFiles(){S.tool.files=[];S.tool.plans={};S.tool.expanded=[];S.tool.status='idle';S.tool.results=[];render();},
     toggleAdv(){S.tool.advOpen=!S.tool.advOpen;render();},
+    tgToolSkip(){S.tool.skipSilence=!S.tool.skipSilence;render();scheduleToolReplan();},
     decChunk(){S.tool.chunkSecs=String(Math.max(30,Math.min(1800,toolChunkVal()-10)));render();scheduleToolReplan();},
     incChunk(){S.tool.chunkSecs=String(Math.max(30,Math.min(1800,toolChunkVal()+10)));render();scheduleToolReplan();},
     runSplit(){runSplitExec();},
@@ -982,7 +999,7 @@ document.addEventListener('click',e=>{
     doReg(){runRegister();},
     stop(){e.stopPropagation();},
   };
-  if(act.startsWith('tg:')){const k=act.slice(3);S.params[k]=!S.params[k];render();return;}
+  if(act.startsWith('tg:')){const k=act.slice(3);S.params[k]=!S.params[k];render();if(k==='skip_silence')refreshPlan();return;} // 跳静音影响切分段数 → 重算预览
   if(handlers[act])handlers[act]();
 });
 

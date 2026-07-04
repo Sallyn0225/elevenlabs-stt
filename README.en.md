@@ -89,7 +89,7 @@ python web.py            # opens http://127.0.0.1:8756
 - **Accounts page**: reads `accounts.json`, with search/sort/multi-select/pagination and back-to-top, real credit refresh (selected accounts only, fetched concurrently), delete, and JSON export.
 - **Log in**: a dialog takes email + password, logs in via Firebase REST directly and saves the token to `accounts.json` (no browser needed).
 - **Start the registrar**: a dialog exposes the full parameters (mapping to `config.toml → [temp_email]` and the target full-account count); "Save" writes back to `config.toml` (two-way sync with the config file); "Start batch create" saves the config first, then runs a real `pool warm` batch registration. Registration emits step-by-step progress logs: the CLI (`stt pool warm` and transcribe-triggered auto-registration) prints them to stderr, and the Web UI register dialog shows them live with a done/target counter.
-- **Tools · long-audio split page**: upload long audio → the backend computes a greedy silence-based cut plan (each part fits one full free account's quota) → run the split and losslessly export the parts to local `out/` for later transcription; shares `audio_split.py` with the CLI `--split`.
+- **Tools · long-audio split page**: upload long audio → the backend computes a greedy silence-based cut plan (each part fits one full free account's quota) → run the split and losslessly export the parts to local `out/` for later transcription; shares `audio_split.py` with the CLI `--split`. Both the transcribe page and this page offer a **"skip long silences" toggle** (off by default): silences ≥10s are dropped from the parts — not uploaded, not billed (the threshold is tunable in this page's advanced params), and the plan shows the total silence time saved.
 - When the pool can't cover all files, the transcribe page prompts you to `pool warm` first — it never registers silently.
 
 Zero extra dependencies, zero build; must be run from the project root (needs `accounts.json`, `config.toml`).
@@ -128,6 +128,8 @@ stt selfcheck          offline self-check (no network)
 | `--keep-chunks` | Keep temporary part files after a successful merge (cleaned up by default) |
 | `--silence-db` | Silence threshold (dB, default `-30`) |
 | `--silence-min` | Minimum silence duration (seconds, default `0.5`) |
+| `--skip-silence` | With `--split`: skip over-long silences entirely — not uploaded, not billed (may produce more parts; off by default) |
+| `--skip-silence-min` | Minimum silence length (seconds) that triggers a skip (default `10`) |
 
 `accounts` flags:
 
@@ -178,7 +180,12 @@ python stt.py transcribe interview.m4a --split --dry-run
 
 # tune the per-part cap and silence sensitivity
 python stt.py transcribe interview.m4a --split --chunk-secs 480 --silence-db -35 --silence-min 0.8
+
+# skip silences >= 10s: silence is not uploaded and not billed (may produce more parts)
+python stt.py transcribe interview.m4a --split --skip-silence
 ```
+
+Optionally add `--skip-silence` (off by default): silence intervals ≥ `--skip-silence-min` (default 10s) are skipped entirely — never cut into parts, never billed; a 0.5s buffer is kept on each side of the voiced regions, and subtitle timestamps stay aligned to the original audio (skipped spans are simply blank). Since `-c copy` cannot losslessly join discontinuous audio, each voiced region becomes its own part, so the part count may grow.
 
 Constraints & behavior:
 

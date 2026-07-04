@@ -103,7 +103,8 @@ def build_state() -> dict:
     }
 
 
-def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
+def compute_plan(items: list[dict], allowed: list[str] | None = None,
+                 skip_silence: bool = False) -> dict:
     """items: [{id, name, duration}] -> allocation preview.
 
     allowed 非空时把候选账号限定为所列邮箱（手动模式,未知邮箱静默忽略——预览是弱校验,
@@ -133,13 +134,18 @@ def compute_plan(items: list[dict], allowed: list[str] | None = None) -> dict:
         name, dur, uid = it["name"], it.get("duration"), it.get("id")
         if dur is not None and dur > chunk_secs:
             plan = _plan_one(uid, chunk_secs, audio_split.SILENCE_DB_DEFAULT,
-                             audio_split.SILENCE_MIN_DEFAULT) if uid else \
+                             audio_split.SILENCE_MIN_DEFAULT,
+                             skip_min=audio_split.SKIP_SILENCE_DEFAULT if skip_silence
+                             else None) if uid else \
                 {"error": "缺少上传标识，无法切分"}
             if plan.get("error"):
                 finfo.append({"name": name, "splitError": plan["error"]})
                 continue  # surfaced as an error row, never a negative bin
             segs = plan["segments"]
-            finfo.append({"name": name, "segCount": len(segs)})
+            fi = {"name": name, "segCount": len(segs)}
+            if plan.get("skipped"):
+                fi["skipped"] = plan["skipped"]   # UI shows saved silence time (R6)
+            finfo.append(fi)
             costs.extend((f"{name} · part{i:02d}", stt.estimate_required(e - s))
                          for i, (s, e) in enumerate(segs))
         else:
@@ -460,7 +466,9 @@ def _transcribe_impl(upload_ids: list[str], params: dict,
             parents.append(p)
             if dur is not None and dur > chunk_secs:
                 sp = _plan_one(uid, chunk_secs, audio_split.SILENCE_DB_DEFAULT,
-                               audio_split.SILENCE_MIN_DEFAULT)
+                               audio_split.SILENCE_MIN_DEFAULT,
+                               skip_min=audio_split.SKIP_SILENCE_DEFAULT
+                               if params.get("skip_silence") else None)
                 if sp.get("error"):
                     p["error"] = sp["error"]
                     continue
@@ -578,11 +586,13 @@ def _transcribe_impl(upload_ids: list[str], params: dict,
 
 # ------------------------------------------------------- 长音频切分 (local)
 
-def _split_params(body: dict) -> tuple[int, float, float]:
-    """Resolve (chunk_secs, silence_db, silence_min) from a request, filling defaults.
+def _split_params(body: dict) -> tuple[int, float, float, float | None]:
+    """Resolve (chunk_secs, silence_db, silence_min, skip_min) from a request.
 
     chunk_secs defaults to the account-derived value and is clamped to [30, 1800]
     (matches the UI stepper); bad/blank values fall back to the default.
+    skip_min is None unless the request enables skip_silence (None = feature off,
+    original plan_cuts path); when on it's clamped to [2, 600], default 10.
     """
     acfg = stt.accounts_config(CONFIG_PATH)
     default_chunk = audio_split.default_chunk_secs(
@@ -600,11 +610,15 @@ def _split_params(body: dict) -> tuple[int, float, float]:
         except (KeyError, TypeError, ValueError):
             return default
 
+    skip_min = None
+    if body.get("skip_silence"):
+        skip_min = max(2.0, min(600.0, _num("skip_min", audio_split.SKIP_SILENCE_DEFAULT)))
     return chunk, _num("silence_db", audio_split.SILENCE_DB_DEFAULT), \
-        _num("silence_min", audio_split.SILENCE_MIN_DEFAULT)
+        _num("silence_min", audio_split.SILENCE_MIN_DEFAULT), skip_min
 
 
-def _plan_one(uid: str, chunk_secs: int, silence_db: float, silence_min: float) -> dict:
+def _plan_one(uid: str, chunk_secs: int, silence_db: float, silence_min: float,
+              skip_min: float | None = None) -> dict:
     """Compute one file's greedy split plan against the real ffmpeg silence detection.
 
     duration <= chunk_secs short-circuits to a single segment (no decode, same
@@ -627,14 +641,21 @@ def _plan_one(uid: str, chunk_secs: int, silence_db: float, silence_min: float) 
             cache[key] = audio_split.detect_silences(up["path"], silence_db, silence_min)
         except Exception as e:  # ffmpeg missing / decode failure → surface, don't 500
             return {**base, "error": repr(e)}
+    if skip_min is not None:  # skip mode: same cached silences, different planner
+        segs, hard = audio_split.plan_cuts_skip(duration, chunk_secs, cache[key], skip_min)
+        if not segs:
+            return {**base, "error": "音频内容全部为静音"}
+        skipped = duration - sum(e - s for s, e in segs)
+        return {**base, "segments": [[s, e] for s, e in segs], "hard": hard,
+                "skipped": skipped if skipped > 1e-6 else 0.0}
     mids = [(s + e) / 2 for s, e in cache[key]]
     segs, hard = audio_split.plan_cuts(duration, chunk_secs, mids)
     return {**base, "segments": [[s, e] for s, e in segs], "hard": hard}
 
 
 def do_split_plan(body: dict) -> dict:
-    chunk, db, smin = _split_params(body)
-    return {"files": [_plan_one(uid, chunk, db, smin)
+    chunk, db, smin, skipm = _split_params(body)
+    return {"files": [_plan_one(uid, chunk, db, smin, skip_min=skipm)
                       for uid in body.get("uploads", [])]}
 
 
@@ -644,7 +665,7 @@ def do_split_run(body: dict) -> dict:
     output_dir is resolved relative to the project root (HERE), default 'out'.
     Per-file failures are recorded and skipped, matching the CLI's tolerance.
     """
-    chunk, db, smin = _split_params(body)
+    chunk, db, smin, skipm = _split_params(body)
     out_base = (body.get("output_dir") or "").strip() or "out"
     base_dir = HERE / out_base
     results = []
@@ -656,7 +677,7 @@ def do_split_run(body: dict) -> dict:
         name = up["name"]
         stem = pathlib.Path(name).stem
         rel_out = f"{out_base}/{stem}-chunks"
-        plan = _plan_one(uid, chunk, db, smin)
+        plan = _plan_one(uid, chunk, db, smin, skip_min=skipm)
         if plan.get("error"):
             results.append({"name": name, "ok": False, "error": plan["error"],
                             "outDir": rel_out})
@@ -746,7 +767,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/plan":
                 body = self._read_json()
                 self._send_json(compute_plan(body.get("files", []),
-                                             body.get("allowedEmails") or None))
+                                             body.get("allowedEmails") or None,
+                                             bool(body.get("skipSilence"))))
                 return
             if path == "/api/transcribe":
                 body = self._read_json()

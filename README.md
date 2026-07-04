@@ -89,7 +89,7 @@ python web.py            # 打开 http://127.0.0.1:8756
 - **账号管理页**：读取 `accounts.json`，支持搜索/排序/多选/分页与回顶、真实刷新额度（仅刷新勾选账号，多账号并发）、删除、导出 JSON。
 - **登录账号**：弹窗输入邮箱+密码，走 Firebase REST 直接登录并把令牌保存到 `accounts.json`（无需浏览器）。
 - **启动注册机**：弹窗提供完整参数（对应 `config.toml → [temp_email]` 与目标满额账号数），「保存」会写回 `config.toml`（与配置文件双向同步）；「开始批量创建」先保存配置再跑真实 `pool warm` 批量注册。注册期间有分步进度日志：CLI（`stt pool warm` 及转录触发的自动注册）打印到 stderr，WebUI 注册弹窗内实时滚动显示并带 已完成/目标 计数。
-- **功能管理 · 长音频切分页**：上传长音频 → 后端按静音点计算贪心切分方案（每段落在单个满额账号额度内）→ 执行切分并无损导出片段到本地 `out/`，供后续转录；与 CLI `--split` 共用 `audio_split.py` 的切分逻辑。
+- **功能管理 · 长音频切分页**：上传长音频 → 后端按静音点计算贪心切分方案（每段落在单个满额账号额度内）→ 执行切分并无损导出片段到本地 `out/`，供后续转录；与 CLI `--split` 共用 `audio_split.py` 的切分逻辑。转录页与本页均提供**「跳过长静音」开关**（默认关）：打开后 ≥10s 的静音区间不切进片段、不上传不计费（本页高级参数可调阈值），方案处显示省下的静音时长。
 - 账号池不足以覆盖所有文件时，转录页会提示先 `pool warm`，不会静默注册。
 
 零额外依赖、零构建；须在项目根目录运行（需 `accounts.json`、`config.toml`）。
@@ -128,6 +128,8 @@ stt selfcheck          离线自检（不联网）
 | `--keep-chunks` | 合并成功后保留临时片段文件（默认清理） |
 | `--silence-db` | 静音判定阈值（dB，默认 `-30`） |
 | `--silence-min` | 最短静音时长（秒，默认 `0.5`） |
+| `--skip-silence` | 配合 `--split`：跳过超长静音区间，不上传不计费（段数可能变多，默认关） |
+| `--skip-silence-min` | 触发跳过的最短静音时长（秒，默认 `10`） |
 
 `accounts` 参数：
 
@@ -178,7 +180,12 @@ python stt.py transcribe interview.m4a --split --dry-run
 
 # 自定义片段上限与静音灵敏度
 python stt.py transcribe interview.m4a --split --chunk-secs 480 --silence-db -35 --silence-min 0.8
+
+# 跳过 ≥10s 的长静音：静音不上传、不计费（段数可能变多）
+python stt.py transcribe interview.m4a --split --skip-silence
 ```
+
+可选加 `--skip-silence`（默认关）：≥ `--skip-silence-min`（默认 10s）的静音区间整段跳过，不切进片段、不消耗额度；有声区间两侧各保留 0.5s 缓冲，字幕时间轴仍与原音频对齐（被跳过处为空白）。由于 `-c copy` 无法无损拼接不连续音频，每个有声区间独立成段，段数可能比不跳时多。
 
 约束与行为：
 

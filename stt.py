@@ -1336,6 +1336,9 @@ def _print_split_plan(parents: list[dict[str, Any]]) -> None:
             tag = " HARD-CUT" if p["hard"][i] else ""
             print(f"      part{i:02d}  {s:8.1f}s -> {e:8.1f}s  ({e - s:5.1f}s){tag}",
                   file=sys.stderr)
+        if p.get("skipped"):
+            print(f"      skipped {p['skipped']:.1f}s of silence (not uploaded)",
+                  file=sys.stderr)
 
 
 def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
@@ -1364,12 +1367,22 @@ def _transcribe_split(args, cfg, files, config_path, store, acfg) -> int:
                   f"treating as a single segment", file=sys.stderr)
         try:
             if total is not None and total > chunk_secs:
-                mids = [(s + e) / 2 for (s, e) in
-                        audio_split.detect_silences(audio, noise_db, min_silence)]
-                segs, hard = audio_split.plan_cuts(total, chunk_secs, mids)
+                silences = audio_split.detect_silences(audio, noise_db, min_silence)
+                if getattr(args, "skip_silence", False):
+                    segs, hard = audio_split.plan_cuts_skip(total, chunk_secs, silences,
+                                                            args.skip_silence_min)
+                    if not segs:  # entirely long silence: nothing to transcribe
+                        parents.append({"audio": audio, "final": final,
+                                        "error": "音频内容全部为静音", "chunks": []})
+                        continue
+                else:
+                    mids = [(s + e) / 2 for (s, e) in silences]
+                    segs, hard = audio_split.plan_cuts(total, chunk_secs, mids)
                 workdir = pathlib.Path("out") / f"{audio.stem}-chunks"
+                skipped = total - sum(e - s for s, e in segs)
                 p = {"audio": audio, "final": final, "split": True, "workdir": workdir,
-                     "segs": segs, "hard": hard, "chunks": []}
+                     "segs": segs, "hard": hard, "chunks": [],
+                     "skipped": skipped if skipped > 1e-6 else 0.0}
             else:
                 p = {"audio": audio, "final": final, "split": False, "workdir": None,
                      "segs": [(0.0, total or 0.0)], "hard": [False], "chunks": []}
@@ -1648,6 +1661,35 @@ def _selfcheck() -> int:
     segs2, hard2 = audio_split.plan_cuts(700.0, 300.0, [])
     assert segs2 == [(0.0, 300.0), (300.0, 600.0), (600.0, 700.0)], segs2
     assert hard2 == [True, True, False]
+    # plan_cuts_skip: silences >= skip_min are dropped, short ones untouched (AC1)
+    sil = [(50.0, 65.0), (200.0, 201.0), (400.0, 412.0)]  # 15s + 1s + 12s, skip_min=10
+    sk, skh = audio_split.plan_cuts_skip(500.0, 300.0, sil, 10.0)
+    pad = audio_split.SKIP_EDGE_PAD
+    # middle voiced region (64.5..400.5 = 336s > 300) greedy-splits at the 1s-silence midpoint
+    assert sk == [(0.0, 50.0 + pad), (65.0 - pad, 200.5), (200.5, 400.0 + pad),
+                  (412.0 - pad, 500.0)], sk
+    assert len(skh) == len(sk)
+    for a, b in sk:  # every segment <= chunk_secs, absolute coords inside [0, total]
+        assert 0.0 <= a < b <= 500.0 and b - a <= 300.0 + 1e-9, (a, b)
+    for s, e in [(50.0, 65.0), (400.0, 412.0)]:  # long silences fully skipped (pad aside)
+        assert not any(a < (s + e) / 2 < b for a, b in sk), (s, e, sk)
+    skipped_total = 500.0 - sum(b - a for a, b in sk)
+    assert abs(skipped_total - (15.0 + 12.0 - 4 * pad)) < 1e-6, skipped_total
+    # >= boundary: a silence exactly skip_min long is skipped
+    skb, _ = audio_split.plan_cuts_skip(100.0, 300.0, [(40.0, 50.0)], 10.0)
+    assert skb == [(0.0, 40.0 + pad), (50.0 - pad, 100.0)], skb
+    # no long silence: byte-identical to plan_cuts on the midpoints
+    same = audio_split.plan_cuts_skip(500.0, 300.0, [(99.0, 101.0), (249.0, 251.0), (279.0, 281.0)], 10.0)
+    assert same == audio_split.plan_cuts(500.0, 300.0, [100.0, 250.0, 280.0]), same
+    # all-silence audio -> empty plan; leading/trailing long silence -> degenerate dropped
+    assert audio_split.plan_cuts_skip(60.0, 300.0, [(0.0, 60.0)], 10.0) == ([], [])
+    ends, _ = audio_split.plan_cuts_skip(100.0, 300.0, [(0.0, 20.0), (80.0, 100.0)], 10.0)
+    assert ends == [(20.0 - pad, 80.0 + pad)], ends
+    # long voiced region still greedy-splits on the short silences inside it
+    lsil = [(0.0, 30.0), (250.0, 251.0)]
+    lsk, lskh = audio_split.plan_cuts_skip(700.0, 300.0, lsil, 10.0)
+    assert all(b - a <= 300.0 + 1e-9 for a, b in lsk), lsk
+    assert lsk[0] == (30.0 - pad, 250.5), lsk  # cut at the short-silence midpoint
     # merge_srt: offset correction + start-sort + contiguous renumber from 1
     c0 = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
     c1 = "1\n00:00:00,500 --> 00:00:01,500\nworld\n"
@@ -1834,6 +1876,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"silencedetect noise floor in dB (default {audio_split.SILENCE_DB_DEFAULT})")
     t.add_argument("--silence-min", type=float,
                    help=f"silencedetect min silence seconds (default {audio_split.SILENCE_MIN_DEFAULT})")
+    t.add_argument("--skip-silence", action="store_true",
+                   help="with --split: drop silences >= --skip-silence-min from the chunks "
+                        "(not uploaded, not billed; may produce more segments)")
+    t.add_argument("--skip-silence-min", type=float, default=audio_split.SKIP_SILENCE_DEFAULT,
+                   help=f"minimum silence length in seconds to skip "
+                        f"(default {audio_split.SKIP_SILENCE_DEFAULT})")
 
     sub.add_parser("list-languages", help="print supported language names + codes")
     sc = sub.add_parser("selfcheck", help="run offline self-check")

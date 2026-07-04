@@ -23,6 +23,8 @@ SPLIT_SAFETY = 0.95
 SILENCE_DB_DEFAULT = -30.0   # ffmpeg silencedetect noise floor (dB)
 SILENCE_MIN_DEFAULT = 0.5    # ffmpeg silencedetect minimum silence duration (s)
 MIN_SEG = 5.0                # reject cut candidates < this after a segment start
+SKIP_SILENCE_DEFAULT = 10.0  # silences >= this (s) are skipped when skip mode is on
+SKIP_EDGE_PAD = 0.5          # silence buffer kept on each side of a voiced region (s)
 
 
 @dataclass
@@ -113,6 +115,42 @@ def plan_cuts(total_secs: float, chunk_secs: float,
         start = cut
     segments.append((start, total_secs))
     hard_flags.append(False)
+    return segments, hard_flags
+
+
+def plan_cuts_skip(total_secs: float, chunk_secs: float,
+                   silences: list[tuple[float, float]],
+                   skip_min: float) -> tuple[list[tuple[float, float]], list[bool]]:
+    """plan_cuts variant that drops silences >= skip_min entirely (not uploaded).
+
+    `silences` are raw detect_silences (start, end) intervals. Returns the same
+    contract as plan_cuts: (segments, hard_flags) in absolute audio time — segments
+    are no longer contiguous, but cut_segments/merge work per-segment so nothing
+    downstream changes. All-silence audio returns ([], []).
+    """
+    # skip_min below 2*pad would let adjacent padded regions overlap (duplicated
+    # audio in the output); clamp here so every caller (CLI has no arg clamp) is safe
+    skip_min = max(skip_min, 2 * SKIP_EDGE_PAD)
+    long_sil = sorted((s, e) for s, e in silences if e - s >= skip_min)
+    if not long_sil:  # nothing to skip: byte-identical to the plain path
+        return plan_cuts(total_secs, chunk_secs, [(s + e) / 2 for s, e in silences])
+    # complement of the long silences = voiced regions; drop degenerate ones
+    # (audio starting/ending in a long silence), then pad survivors so -c copy
+    # keyframe drift can't eat word edges (SKIP_EDGE_PAD << skip_min, no overlap).
+    voiced: list[tuple[float, float]] = []
+    pos = 0.0
+    for s, e in long_sil + [(total_secs, total_secs)]:
+        if s - pos > 0:
+            voiced.append((max(0.0, pos - SKIP_EDGE_PAD), min(total_secs, s + SKIP_EDGE_PAD)))
+        pos = max(pos, e)
+    segments: list[tuple[float, float]] = []
+    hard_flags: list[bool] = []
+    for a, b in voiced:
+        # all silence midpoints inside the region (short ones too) feed the greedy core
+        rel_mids = [(s + e) / 2 - a for s, e in silences if a < (s + e) / 2 < b]
+        segs, hard = plan_cuts(b - a, chunk_secs, rel_mids)
+        segments.extend((a + s, a + e) for s, e in segs)
+        hard_flags.extend(hard)
     return segments, hard_flags
 
 
