@@ -3,9 +3,11 @@
 
 Pure logic (chunk sizing, greedy cut planning, timestamp parse/format, srt/vtt/txt
 merge) is decoupled from the network/account layer so it is offline-unit-testable
-(see selfcheck.py). ffmpeg is only touched by detect_silences/cut_segments.
+(see selfcheck.py). ffmpeg is only touched by detect_silences/cut_segments/
+extract_audio.
 
 Design: .trellis/tasks/07-02-audio-silence-split/design.md
+        .trellis/tasks/07-13-webui-video-audio-extract/design.md
 """
 from __future__ import annotations
 
@@ -26,6 +28,12 @@ MIN_SEG = 5.0                # reject cut candidates < this after a segment star
 SKIP_SILENCE_DEFAULT = 10.0  # silences >= this (s) are skipped when skip mode is on
 SKIP_EDGE_PAD = 0.5          # silence buffer kept on each side of a voiced region (s)
 
+# WebUI video accept / server-side extract: extension-based (no MIME trust).
+VIDEO_EXTENSIONS = frozenset({
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi",
+    ".mpeg", ".mpg", ".ts", ".flv", ".wmv", ".3gp",
+})
+
 
 @dataclass
 class Chunk:
@@ -33,6 +41,18 @@ class Chunk:
     index: int
     path: pathlib.Path
     start: float
+
+
+@dataclass
+class ExtractResult:
+    """Result of extract_audio: output path and which strategy succeeded."""
+    path: pathlib.Path
+    method: str  # "copy" | "transcode"
+
+
+def is_video_filename(name: str) -> bool:
+    """True when the filename suffix is a known video container (case-insensitive)."""
+    return pathlib.Path(name).suffix.lower() in VIDEO_EXTENSIONS
 
 
 # ------------------------------------------------------------ chunk sizing
@@ -159,8 +179,72 @@ def plan_cuts_skip(total_secs: float, chunk_secs: float,
 def _require(tool: str) -> str:
     path = shutil.which(tool)
     if not path:
-        raise RuntimeError(f"{tool} not found on PATH — required for --split")
+        raise RuntimeError(f"{tool} not found on PATH")
     return path
+
+
+def extract_audio(src: pathlib.Path, dest_dir: pathlib.Path,
+                  stem: str) -> ExtractResult:
+    """Extract the first audio stream from a media file via system ffmpeg.
+
+    Strategy (design D3): try stream copy into Matroska audio (.mka) for wide
+    codec compatibility; on failure re-encode to AAC in .m4a. Does not delete
+    `src` — the caller owns lifecycle (web deletes the video after success).
+
+    Raises RuntimeError when ffmpeg is missing, there is no audio stream, or
+    both strategies fail.
+    """
+    ffmpeg = _require("ffmpeg")
+    dest_dir = pathlib.Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^\w.\-]+", "_", stem or "audio", flags=re.UNICODE).strip("._") or "audio"
+    copy_out = dest_dir / f"{safe}.mka"
+    trans_out = dest_dir / f"{safe}.m4a"
+    for stale in (copy_out, trans_out):
+        if stale.exists():
+            stale.unlink()
+
+    def _ok(path: pathlib.Path) -> bool:
+        return path.is_file() and path.stat().st_size > 0
+
+    def _no_audio(stderr: str) -> bool:
+        low = stderr.lower()
+        return (
+            "matches no streams" in low
+            or "does not contain any stream" in low
+            or "stream map '0:a:0'" in low
+            or "output file does not contain any stream" in low
+        )
+
+    copy_proc = subprocess.run(
+        [ffmpeg, "-y", "-i", str(src), "-vn", "-map", "0:a:0", "-c:a", "copy",
+         str(copy_out)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    copy_err = (copy_proc.stderr or b"").decode("utf-8", "replace")
+    if copy_proc.returncode == 0 and _ok(copy_out):
+        return ExtractResult(copy_out, "copy")
+    if copy_out.exists():
+        copy_out.unlink()
+
+    if _no_audio(copy_err):
+        raise RuntimeError("no audio stream")
+
+    trans_proc = subprocess.run(
+        [ffmpeg, "-y", "-i", str(src), "-vn", "-map", "0:a:0",
+         "-c:a", "aac", "-b:a", "192k", str(trans_out)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    trans_err = (trans_proc.stderr or b"").decode("utf-8", "replace")
+    if trans_proc.returncode == 0 and _ok(trans_out):
+        return ExtractResult(trans_out, "transcode")
+    if trans_out.exists():
+        trans_out.unlink()
+
+    if _no_audio(trans_err) or _no_audio(copy_err):
+        raise RuntimeError("no audio stream")
+    tail = [ln for ln in (trans_err or copy_err).strip().splitlines() if ln.strip()][-3:]
+    raise RuntimeError("ffmpeg extract failed: " + " | ".join(tail)[:300])
 
 
 def detect_silences(path: pathlib.Path, noise_db: float,

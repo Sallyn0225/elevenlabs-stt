@@ -68,7 +68,7 @@ function applyTheme(name){const t=THEMES[name]||THEMES.light;const r=document.do
 const S = {
   theme:'light', view:'transcribe',
   data:null,                 // /api/state payload
-  files:[],                  // {id,name,size,duration,credits,ext,uploading}
+  files:[],                  // {id,name,size,duration,credits,ext,stage,uploading,extracted}
   params:{language:'auto',languageName:'自动检测',format:'srt',vocab:['ElevenLabs'],
           tag_audio_events:true,include_subtitles:true,no_verbatim:false,
           use_speaker_library:false,show_cost:false,skip_silence:false},
@@ -97,6 +97,12 @@ const S = {
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = n => Math.round(n||0).toLocaleString('en-US');
 const humanSize = b => b>=1e6? (b/1e6).toFixed(1)+' MB' : (b/1e3).toFixed(0)+' KB';
+// video accept: MIME + extensions (browsers vary); keep in sync with audio_split.VIDEO_EXTENSIONS
+const FILE_ACCEPT='audio/*,video/*,.mp4,.m4v,.mov,.mkv,.webm,.avi,.mpeg,.mpg,.ts,.flv,.wmv,.3gp';
+const FILE_HINT_AUDIO='MP3 / WAV / M4A / FLAC / OGG';
+const FILE_HINT_VIDEO='MP4 / MKV / WEBM / MOV';
+const stageLabel = f => f.stage==='uploading'?'上传中…':f.stage==='extracting'?'提取音轨中…':null;
+const setStage = (f, stage) => { f.stage=stage; f.uploading=!!stage; };
 const dur2str = s => { if(s==null) return '—'; s=Math.round(s); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
 // h:mm:ss (or m:ss under 1h) — 长音频切分方案里段时长常 > 1h,dur2str 的 MM:SS 会溢出
 const clock = s => { if(s==null) return '—'; s=Math.max(0,Math.round(s)); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60,p=n=>String(n).padStart(2,'0'); return h>0?`${h}:${p(m)}:${p(x)}`:`${m}:${p(x)}`; };
@@ -149,16 +155,18 @@ function fileRowHTML(f,i){
   const right = done && !f.failed
     ? `<button data-act="download" data-arg="${i}" style="flex:none;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:6px;border:1px solid var(--border);background:var(--panel,#fff);color:var(--fg);font-size:12px;font-weight:500;cursor:pointer">下载 ${esc((f.download||'').split('.').pop().toUpperCase())}</button>`
     : `<div data-act="removeFile" data-arg="${i}" role="button" tabindex="0" aria-label="移除文件 ${esc(f.name)}" class="tap" style="flex:none;width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--mut-fg);cursor:pointer;font-size:13px">✕</div>`;
-  const credits = f.uploading? '…' : (f.credits!=null? fmt(f.credits) : '—');
+  const st=stageLabel(f);
+  const credits = st? '…' : (f.credits!=null? fmt(f.credits) : '—');
   return `<div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff)">
     <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--mut-fg);border:1px solid var(--border)" class="mono">${esc(f.ext)}</div>
     <div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:8px;min-width:0">
         <span style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</span>
+        ${f.extracted?`<span style="flex:none;font-size:11px;color:var(--mut-fg);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">音轨</span>`:''}
         ${(si=>si&&si.segCount?`<span style="flex:none;font-size:11px;color:var(--amber);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">将切分为 ${si.segCount} 段${si.skipped>0?` · 省 ${clock(si.skipped)} 静音`:''}</span>`
           :si&&si.splitError?`<span title="${esc(si.splitError)}" style="flex:none;font-size:11px;color:var(--red)">切分失败</span>`:'')(splitInfo(f.name))}
       </div>
-      <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${esc(humanSize(f.size))} · ${esc(dur2str(f.duration))}</div>
+      <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${st?esc(st):`${esc(humanSize(f.size))} · ${esc(dur2str(f.duration))}`}</div>
     </div>
     <div style="flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut-fg);background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 9px" class="mono">≈ ${credits}<span style="opacity:.55">credits</span></div>
     ${right}
@@ -344,12 +352,12 @@ function transcribeView(){
 
   return `<main style="max-width:1024px;margin:0 auto;padding:34px 24px 132px;display:flex;flex-direction:column;gap:26px">
     <div><h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-0.04em">上传音频,生成字幕</h1>
-      <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">支持单个或批量上传 · 按额度自动分配账号 · 完成后自动下载字幕文件</p></div>
-    <label data-drop="pickFiles" tabindex="0" role="button" aria-label="选择或拖拽音频文件" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
-      <input type="file" multiple accept="audio/*" data-input="pickFiles" style="display:none"/>
+      <p style="margin:7px 0 0;font-size:14px;color:var(--mut-fg)">支持音频与视频 · 视频自动提取音轨 · 按额度自动分配账号 · 完成后自动下载字幕</p></div>
+    <label data-drop="pickFiles" tabindex="0" role="button" aria-label="选择或拖拽音频或视频文件" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:34px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
+      <input type="file" multiple accept="${FILE_ACCEPT}" data-input="pickFiles" style="display:none"/>
       <div style="width:46px;height:46px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;border:1px solid var(--border);color:var(--fg)"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></div>
-      <div><div style="font-size:15px;font-weight:600">拖拽音频文件到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
-        <div style="margin-top:6px;font-size:12.5px;color:var(--mut-fg)">支持多选 · MP3 / WAV / M4A / FLAC / OGG · 单文件最大 1000 MB</div></div>
+      <div><div style="font-size:15px;font-weight:600">拖拽音频或视频到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
+        <div style="margin-top:6px;font-size:12.5px;color:var(--mut-fg)">支持多选 · ${FILE_HINT_AUDIO} · ${FILE_HINT_VIDEO} · 视频自动提取音轨 · 单文件最大 1000 MB</div></div>
     </label>
     ${fileSection}
     ${acctSection}
@@ -689,15 +697,19 @@ function toolFileRowHTML(f){
   const p=S.tool.plans[f.id];
   const expanded=f.id&&S.tool.expanded.includes(f.id);
   const hardCount=(p&&!p.error)?(p.hard||[]).filter(Boolean).length:0;
-  const segStr=f.uploading?'…':(p&&p.error?'!':(seg==null?'…':seg));
+  const st=stageLabel(f);
+  const segStr=st?'…':(p&&p.error?'!':(seg==null?'…':seg));
   const hardBadge=hardCount?`<div style="flex:none;font-size:11px;color:var(--amber);border:1px solid var(--border);border-radius:5px;padding:4px 8px" title="窗口内无静音,按时长硬切">${hardCount} 硬切</div>`:'';
   const skipBadge=(p&&!p.error&&p.skipped>0)?`<div style="flex:none;font-size:11px;color:var(--green);border:1px solid var(--border);border-radius:5px;padding:4px 8px" title="被跳过的长静音总时长,不保存进片段">省 ${clock(p.skipped)} 静音</div>`:'';
   return `<div style="border:1px solid var(--border);border-radius:6px;background:var(--panel,#fff);overflow:hidden">
     <div style="display:flex;align-items:center;gap:14px;padding:13px 16px">
       <div style="flex:none;width:38px;height:38px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--mut-fg);border:1px solid var(--border)" class="mono">${esc(f.ext)}</div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</div>
-        <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${esc(humanSize(f.size))} · ${esc(clock(f.duration))} · ${f.duration!=null?f.duration.toFixed(1)+'s':'—'}</div>
+        <div style="display:flex;align-items:center;gap:8px;min-width:0">
+          <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</div>
+          ${f.extracted?`<span style="flex:none;font-size:11px;color:var(--mut-fg);background:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 7px">音轨</span>`:''}
+        </div>
+        <div style="margin-top:3px;font-size:12px;color:var(--mut-fg)" class="mono">${st?esc(st):`${esc(humanSize(f.size))} · ${esc(clock(f.duration))} · ${f.duration!=null?f.duration.toFixed(1)+'s':'—'}`}</div>
       </div>
       <div style="flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg);background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px" class="mono">→ ${segStr} 段</div>
       ${hardBadge}${skipBadge}
@@ -769,11 +781,11 @@ function toolsView(){
       </div>
       <div style="padding:22px;display:flex;flex-direction:column;gap:20px">
         <label data-drop style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:28px 24px;border:1.5px dashed var(--border);border-radius:6px;background:var(--muted2);cursor:pointer;text-align:center">
-          <input data-input="pickFiles" type="file" multiple accept="audio/*" style="display:none"/>
+          <input data-input="pickFiles" type="file" multiple accept="${FILE_ACCEPT}" style="display:none"/>
           <div style="width:42px;height:42px;border-radius:6px;background:var(--muted);display:flex;align-items:center;justify-content:center;border:1px solid var(--border);color:var(--fg)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></div>
           <div>
-            <div style="font-size:14.5px;font-weight:600">拖拽长音频到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
-            <div style="margin-top:6px;font-size:12px;color:var(--mut-fg)">支持多选 · 建议时长 &gt; ${clock(chunk)} 的文件 · MP3 / WAV / M4A / FLAC / OGG</div>
+            <div style="font-size:14.5px;font-weight:600">拖拽长音频或视频到此处,或 <span style="text-decoration:underline;text-underline-offset:3px">点击选择</span></div>
+            <div style="margin-top:6px;font-size:12px;color:var(--mut-fg)">支持多选 · 建议时长 &gt; ${clock(chunk)} · ${FILE_HINT_AUDIO} · ${FILE_HINT_VIDEO} · 视频自动提取音轨</div>
           </div>
         </label>
         ${n?`<div style="display:flex;flex-direction:column;gap:11px">
@@ -909,16 +921,38 @@ async function addFiles(fileList){
   for(const file of fileList){
     if(file.size>1000*1024*1024){ toast(`${file.name} 超过 1000 MB,已跳过`); continue; }
     const ext=(file.name.split('.').pop()||'').toUpperCase().slice(0,4);
-    const entry={id:null,name:file.name,size:file.size,duration:null,credits:null,ext,uploading:true};
+    const entry={id:null,name:file.name,size:file.size,duration:null,credits:null,ext,
+                 stage:'uploading',uploading:true,extracted:false};
     list.push(entry); render();
-    const dur=await measureDuration(file);
-    entry.duration=dur;
+    // 视频时长以服务端抽轨后 ffprobe 为准；音频仍用浏览器 metadata 作回退
+    const wantClientDur=!/\.(mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|ts|flv|wmv|3gp)$/i.test(file.name);
+    const dur=wantClientDur?await measureDuration(file):null;
+    if(dur!=null) entry.duration=dur;
     const qs=new URLSearchParams({name:file.name}); if(dur)qs.set('duration',dur);
     try{
       const res=await api('/api/upload?'+qs,{method:'POST',body:file});
-      entry.id=res.id; entry.duration=res.duration!=null?res.duration:dur; entry.credits=res.credits; entry.uploading=false;
-      toast(file.name+' 上传成功');
-    }catch(e){ entry.uploading=false; entry.credits=null; toast(file.name+' 上传失败'); }
+      if(res.error){ setStage(entry,null); entry.credits=null; toast(file.name+'：'+(res.error||'上传失败')); render(); continue; }
+      entry.id=res.id;
+      if(res.needs_extract){
+        setStage(entry,'extracting'); render();
+        const ex=await api('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({id:res.id})});
+        if(ex.error){
+          // 服务端已丢弃 pending 上传；从列表移除，避免「假就绪」
+          const ix=list.indexOf(entry); if(ix>=0) list.splice(ix,1);
+          toast(file.name+'：'+(ex.error||'提取音轨失败'));
+          render(); continue;
+        }
+        entry.duration=ex.duration!=null?ex.duration:entry.duration;
+        entry.credits=ex.credits; entry.size=ex.size!=null?ex.size:entry.size;
+        entry.extracted=true; setStage(entry,null);
+        toast(file.name+' 已提取音轨');
+      }else{
+        entry.duration=res.duration!=null?res.duration:dur;
+        entry.credits=res.credits; setStage(entry,null);
+        toast(file.name+' 上传成功');
+      }
+    }catch(e){ setStage(entry,null); entry.credits=null; toast(file.name+' 上传失败'); }
     render();
   }
   if(toTool) refreshToolPlans(); else refreshPlan();

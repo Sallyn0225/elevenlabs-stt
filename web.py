@@ -32,7 +32,8 @@ FAVICON = HERE / "favicon.webp"
 CONFIG_PATH = stt.CONFIG_PATH
 _LOCK = threading.Lock()          # serialise accounts.json read/modify/write
 _UPLOAD_DIR = pathlib.Path(tempfile.mkdtemp(prefix="elevenlabs-stt-web-"))
-_UPLOADS: dict[str, dict] = {}    # id -> {"path": Path, "name": str, "duration": float|None}
+# id -> path/name/duration; pending_extract True while video awaits /api/extract
+_UPLOADS: dict[str, dict] = {}
 
 
 # ------------------------------------------------------------- view helpers
@@ -417,7 +418,14 @@ def _transcribe_impl(upload_ids: list[str], params: dict,
 
     Short uploads (duration <= chunk_secs) keep the original whole-file path.
     """
-    uploads = [(i, _UPLOADS[i]) for i in upload_ids if i in _UPLOADS]
+    uploads: list[tuple[str, dict]] = []
+    for i in upload_ids:
+        up = _UPLOADS.get(i)
+        if not up:
+            continue
+        if up.get("pending_extract"):
+            return {"error": f"{up['name']}: 音轨尚未提取完成"}
+        uploads.append((i, up))
     if not uploads:
         return {"error": "没有可转录的文件"}
 
@@ -632,6 +640,8 @@ def _plan_one(uid: str, chunk_secs: int, silence_db: float, silence_min: float,
         return {"id": uid, "name": uid, "error": "上传已失效,请重新上传"}
     name, duration = up["name"], up.get("duration")
     base = {"id": uid, "name": name, "duration": duration}
+    if up.get("pending_extract"):
+        return {**base, "error": "音轨尚未提取完成"}
     if duration is None:
         return {**base, "error": "无法确定音频时长"}
     if duration <= chunk_secs:
@@ -697,6 +707,76 @@ def do_split_run(body: dict) -> dict:
     return {"results": results}
 
 
+def do_extract(uid: str) -> dict:
+    """Pull the first audio stream out of a pending video upload (ffmpeg).
+
+    Success replaces _UPLOADS[uid].path with the audio file and deletes the
+    video. Failure cleans partials + video and drops the upload entry so the
+    client must re-select the file.
+    """
+    up = _UPLOADS.get(uid)
+    if not up:
+        return {"error": "上传已失效,请重新上传"}
+    if not up.get("pending_extract"):
+        path = up["path"]
+        size = path.stat().st_size if isinstance(path, pathlib.Path) and path.is_file() else 0
+        return {
+            "id": uid, "name": up["name"], "duration": up.get("duration"),
+            "credits": stt.estimate_required(up.get("duration")), "size": size,
+            "needs_extract": False, "extract_method": up.get("extract_method"),
+            "audio_name": path.name if isinstance(path, pathlib.Path) else None,
+        }
+
+    video_path = pathlib.Path(up["path"])
+    stem = pathlib.Path(up["name"]).stem
+    out_stem = f"{uid}_{stem}"
+    audio_path: pathlib.Path | None = None
+    try:
+        result = audio_split.extract_audio(video_path, _UPLOAD_DIR, out_stem)
+        audio_path = result.path
+        dur = stt.audio_duration(audio_path)
+        credits = stt.estimate_required(dur)
+        up["path"] = audio_path
+        up["duration"] = dur
+        up["pending_extract"] = False
+        up["extract_method"] = result.method
+        if video_path.is_file() and video_path.resolve() != audio_path.resolve():
+            try:
+                video_path.unlink()
+            except OSError:
+                pass
+        return {
+            "id": uid, "name": up["name"], "duration": dur, "credits": credits,
+            "size": audio_path.stat().st_size, "needs_extract": False,
+            "extract_method": result.method, "audio_name": audio_path.name,
+        }
+    except Exception as e:
+        for p in _UPLOAD_DIR.glob(f"{out_stem}.*"):
+            if p.suffix.lower() in (".mka", ".m4a"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        if audio_path and audio_path.is_file():
+            try:
+                audio_path.unlink()
+            except OSError:
+                pass
+        if video_path.is_file():
+            try:
+                video_path.unlink()
+            except OSError:
+                pass
+        _UPLOADS.pop(uid, None)
+        msg = str(e)
+        low = msg.lower()
+        if "not found on path" in low:
+            return {"error": "未找到 ffmpeg，请安装并加入 PATH 后重试"}
+        if "no audio stream" in low:
+            return {"error": "视频没有可提取的音轨"}
+        return {"error": f"提取音轨失败: {msg[:200]}"}
+
+
 # ------------------------------------------------------------------ server
 
 class Handler(BaseHTTPRequestHandler):
@@ -758,21 +838,34 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/upload":
                 data = self._read_body()
                 name = qs.get("name", ["audio"])[0]
+                disp = pathlib.Path(name).name
                 uid = uuid.uuid4().hex
-                dest = _UPLOAD_DIR / f"{uid}_{pathlib.Path(name).name}"
+                dest = _UPLOAD_DIR / f"{uid}_{disp}"
                 dest.write_bytes(data)
+                # Videos: land only; client calls /api/extract next (two-phase UX).
+                if audio_split.is_video_filename(disp):
+                    _UPLOADS[uid] = {"path": dest, "name": disp, "duration": None,
+                                     "pending_extract": True}
+                    self._send_json({"id": uid, "name": disp, "duration": None,
+                                     "credits": None, "size": len(data),
+                                     "needs_extract": True})
+                    return
                 dur = stt.audio_duration(dest)
                 if dur is None and qs.get("duration"):
                     try:
                         dur = float(qs["duration"][0])
                     except ValueError:
                         dur = None
-                _UPLOADS[uid] = {"path": dest, "name": pathlib.Path(name).name,
-                                 "duration": dur}
+                _UPLOADS[uid] = {"path": dest, "name": disp, "duration": dur,
+                                 "pending_extract": False}
                 credits = stt.estimate_required(dur)
-                self._send_json({"id": uid, "name": pathlib.Path(name).name,
-                                 "duration": dur, "credits": credits,
-                                 "size": len(data)})
+                self._send_json({"id": uid, "name": disp, "duration": dur,
+                                 "credits": credits, "size": len(data),
+                                 "needs_extract": False})
+                return
+            if path == "/api/extract":
+                body = self._read_json()
+                self._send_json(do_extract((body.get("id") or "").strip()))
                 return
             if path == "/api/plan":
                 body = self._read_json()

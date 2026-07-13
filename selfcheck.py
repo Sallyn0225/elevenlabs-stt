@@ -227,6 +227,35 @@ def run() -> int:
     # merge_txt: segment-order concatenation
     assert audio_split.merge_txt([(0.0, "alpha"), (5.0, "beta")]) == "alpha\n\nbeta\n"
 
+    # video filename probe (web upload routing; no ffmpeg)
+    assert audio_split.is_video_filename("clip.MP4") and audio_split.is_video_filename("a.mkv")
+    assert not audio_split.is_video_filename("talk.m4a") and not audio_split.is_video_filename("x")
+    assert audio_split.VIDEO_EXTENSIONS >= {".mp4", ".webm", ".mov"}
+
+    # extract_audio: short synthetic mp4 → audio (skip if ffmpeg/ffprobe unavailable)
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        tdir = pathlib.Path(tempfile.mkdtemp(prefix="stt-extract-"))
+        try:
+            vid = tdir / "clip.mp4"
+            # lavfi sine + color: portable short A/V fixture
+            subprocess_ok = __import__("subprocess").run(
+                [shutil.which("ffmpeg"), "-y",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=0.4",
+                 "-f", "lavfi", "-i", "color=c=black:s=160x120:d=0.4",
+                 "-c:a", "aac", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-shortest", str(vid)],
+                stdout=__import__("subprocess").DEVNULL,
+                stderr=__import__("subprocess").DEVNULL,
+            )
+            if subprocess_ok.returncode == 0 and vid.is_file():
+                er = audio_split.extract_audio(vid, tdir, "out")
+                assert er.method in ("copy", "transcode"), er
+                assert er.path.is_file() and er.path.stat().st_size > 0
+                assert er.path.suffix.lower() in (".mka", ".m4a")
+                assert vid.is_file()  # helper must not delete src
+        finally:
+            shutil.rmtree(tdir, ignore_errors=True)
+
     # REGISTER_LOG hook: collector receives _rlog lines; None default restored
     got: list[str] = []
     stt.REGISTER_LOG = got.append
